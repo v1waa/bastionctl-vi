@@ -333,8 +333,12 @@ validate_user_list() {
 init_log() {
     local log_dir
     if ((DRY_RUN)) || [[ "$ACTION" == "audit" ]]; then
-        log_dir="${TMPDIR:-/tmp}/secure-linux-wizard-logs"
-        install -d -m 700 "$log_dir"
+        # A server dry-run may run through sudo while an Admin PC dry-run runs
+        # as the invoking user.  A shared mode-0700 directory would therefore
+        # lock the second process out.  A fresh directory also avoids symlink
+        # and cross-user collisions in a world-writable temporary directory.
+        log_dir="$(mktemp -d "${TMPDIR:-/tmp}/secure-linux-wizard-logs.XXXXXXXX")"
+        chmod 700 "$log_dir"
     elif [[ "$ROLE" == "server" ]]; then
         log_dir="/var/log/secure-linux-wizard"
         install -d -o root -g root -m 700 "$log_dir"

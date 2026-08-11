@@ -66,8 +66,11 @@ pass 'invalid port rejection'
 
 ADMIN_HOME="$TMP_ROOT/admin-home"
 mkdir -p "$ADMIN_HOME"
-printf '\nexample.invalid\n\n\n\n' \
-    | HOME="$ADMIN_HOME" USER='testadmin' bash "$MAIN" --role admin --lang en --dry-run > "$TMP_ROOT/admin-dry.txt" 2>&1
+if ! printf '\nexample.invalid\n\n\n\n' \
+    | HOME="$ADMIN_HOME" USER='testadmin' bash "$MAIN" --role admin --lang en --dry-run > "$TMP_ROOT/admin-dry.txt" 2>&1; then
+    tail -n 80 "$TMP_ROOT/admin-dry.txt" >&2 || true
+    fail "Admin's PC dry-run failed"
+fi
 assert_contains "$TMP_ROOT/admin-dry.txt" "Admin's PC dry-run complete"
 [[ ! -e "$ADMIN_HOME/.ssh" ]] || fail "Admin's PC dry-run created ~/.ssh"
 [[ -z "$(find "$ADMIN_HOME" -mindepth 1 -print -quit)" ]] || fail "Admin's PC dry-run changed the test home"

@@ -18,5 +18,5 @@ ed09a525cd2c8a5cb6f94053cbf2311d4b4b25521cef7e460f528ddf8e400d42  ./docs/PUBLISH
 9adc5e1b6c979b58afd23de5c8cd5bc0d6d9404b87301eebe2129a7b00ae2856  ./secure-linux-admin.ps1
 c44bd73b48a21fe1ec112e6364337af758be421d50350500d387ecfd9d591b07  ./secure-linux-wizard-en.sh
 e7d7aa89c7753fbf0f687abf6d9036b95fb4fcc49dc3ab788bc6aeda1ceb2e88  ./secure-linux-wizard-ru.sh
-4ae2de6bf6cede6690c61e21a3da7349d96739d7ecf98ddddc7cd84343e3c01d  ./secure-linux-wizard.sh
-4758f6daa66a9592aedaacdae4fa4a2b5d4b53f85d501a979ce66c5ba7e5e1cb  ./tests/smoke.sh
+91920c22a25ef934e938e3806d2838f6d8cc2741e72e6fe17234697f86696745  ./secure-linux-wizard.sh
+6b253292c1d159ad23be5a9b76097e8cd39f894e6dfc897f7893dfa99dd51ab8  ./tests/smoke.sh
