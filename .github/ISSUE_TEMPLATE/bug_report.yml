@@ -1,0 +1,56 @@
+name: Bug report / Сообщить об ошибке
+description: Report a reproducible non-sensitive problem / Сообщить о воспроизводимой проблеме без секретов
+title: "[Bug]: "
+labels:
+    - bug
+body:
+    - type: markdown
+      attributes:
+          value: |
+              Never paste private keys, passphrases, `.env` contents, real tokens, recovery archives, or unredacted server logs.
+              Не публикуйте приватные ключи, кодовые фразы, `.env`, токены, архивы восстановления или необработанные логи.
+    - type: input
+      id: version
+      attributes:
+          label: Version / Версия
+          placeholder: 2026.08.10-2
+      validations:
+          required: true
+    - type: dropdown
+      id: role
+      attributes:
+          label: Mode / Режим
+          options:
+              - Server
+              - Admin's PC (Bash)
+              - Admin's PC (PowerShell)
+              - Audit
+              - Rollback
+      validations:
+          required: true
+    - type: input
+      id: os
+      attributes:
+          label: OS and version / ОС и версия
+          placeholder: Ubuntu Server 24.04 or Windows 11 PowerShell 5.1
+      validations:
+          required: true
+    - type: textarea
+      id: expected
+      attributes:
+          label: Expected behavior / Ожидаемое поведение
+      validations:
+          required: true
+    - type: textarea
+      id: actual
+      attributes:
+          label: Actual behavior and redacted log / Фактическое поведение и очищенный лог
+      validations:
+          required: true
+    - type: checkboxes
+      id: safety
+      attributes:
+          label: Safety confirmation / Подтверждение безопасности
+          options:
+              - label: I removed all secrets and personal server addresses. / Я удалил все секреты и личные адреса сервера.
+                required: true

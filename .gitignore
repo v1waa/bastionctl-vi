@@ -1,0 +1,13 @@
+# Local test and editor artifacts
+*.log
+*.tmp
+*.bak
+*.swp
+.DS_Store
+.idea/
+.vscode/
+
+# Release artifacts are attached to GitHub Releases, not committed
+*.zip
+*.tar.gz
+*.sha256
