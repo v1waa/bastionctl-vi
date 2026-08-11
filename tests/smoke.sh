@@ -28,18 +28,18 @@ assert_contains() {
 bash -n "$ROOT_DIR"/*.sh
 pass 'Bash syntax'
 
-"$MAIN" --help > "$TMP_ROOT/help.txt"
+bash "$MAIN" --help > "$TMP_ROOT/help.txt"
 assert_contains "$TMP_ROOT/help.txt" '--finalize-ssh'
 assert_contains "$TMP_ROOT/help.txt" '--rollback DIR'
 pass 'CLI help'
 
-if "$MAIN" --role invalid --lang en --dry-run > "$TMP_ROOT/invalid-role.txt" 2>&1; then
+if bash "$MAIN" --role invalid --lang en --dry-run > "$TMP_ROOT/invalid-role.txt" 2>&1; then
     fail 'invalid role was accepted'
 fi
 assert_contains "$TMP_ROOT/invalid-role.txt" 'Invalid role'
 pass 'invalid role rejection'
 
-if "$MAIN" --role admin --lang invalid --dry-run > "$TMP_ROOT/invalid-language.txt" 2>&1; then
+if bash "$MAIN" --role admin --lang invalid --dry-run > "$TMP_ROOT/invalid-language.txt" 2>&1; then
     fail 'invalid language was accepted'
 fi
 assert_contains "$TMP_ROOT/invalid-language.txt" 'Invalid language'

@@ -1,4 +1,4 @@
-# Secure Linux Wizard — Windows administrator helper
+﻿# Secure Linux Wizard — Windows administrator helper
 # Мастер защиты Linux — помощник для Windows
 #
 # Creates an Ed25519 key, configures Windows OpenSSH/ssh-agent, writes a
