@@ -14,5 +14,8 @@ type Options struct {
 }
 
 func Run(ctx context.Context, cfg config.Config, version string, options Options) *report.Report {
+	if options.Action == "reset-plan" || options.Action == "reset" {
+		return resetPlatform(ctx, cfg, version, options)
+	}
 	return runPlatform(ctx, cfg, version, options)
 }

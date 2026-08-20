@@ -37,7 +37,7 @@ func TestHelp(t *testing.T) {
 	if code := Run(context.Background(), []string{"help"}, "test", strings.NewReader(""), &stdout, &stderr); code != exitOK {
 		t.Fatalf("code=%d", code)
 	}
-	if !strings.Contains(stdout.String(), "server audit") || !strings.Contains(stdout.String(), "admin doctor") || !strings.Contains(stdout.String(), "--password-bootstrap") || !strings.Contains(stdout.String(), "fleet bootstrap") {
+	if !strings.Contains(stdout.String(), "server audit") || !strings.Contains(stdout.String(), "admin doctor") || !strings.Contains(stdout.String(), "--password-bootstrap") || !strings.Contains(stdout.String(), "fleet bootstrap") || !strings.Contains(stdout.String(), "fleet user-add") || !strings.Contains(stdout.String(), "fleet reset-plan") {
 		t.Fatalf("incomplete help: %s", stdout.String())
 	}
 }
@@ -54,6 +54,14 @@ func TestPasswordBootstrapFlagsAreActionScoped(t *testing.T) {
 	bootstrap, ok := fleetSpecification("bootstrap")
 	if !ok || len(bootstrap) != 2 {
 		t.Fatalf("unexpected bootstrap specification: %+v", bootstrap)
+	}
+	userAdd, ok := fleetSpecification("user-add")
+	if !ok || !userAdd["--username"] || !userAdd["--public-key"] || userAdd["--yes"] || userAdd["--sudo"] {
+		t.Fatalf("unexpected user-add specification: %+v", userAdd)
+	}
+	reset, ok := fleetSpecification("reset")
+	if !ok || reset["--yes"] {
+		t.Fatalf("unexpected reset specification: %+v", reset)
 	}
 }
 
@@ -105,5 +113,13 @@ func TestActionSpecificFlagsAreRejected(t *testing.T) {
 		if code := Run(context.Background(), args, "test", strings.NewReader(""), &stdout, &stderr); code != exitUsage {
 			t.Fatalf("args=%v code=%d stderr=%q", args, code, stderr.String())
 		}
+	}
+}
+
+func TestFleetResetRequiresConfirmationBeforeConnection(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := Run(context.Background(), []string{"fleet", "reset", "missing", "--state-dir", t.TempDir()}, "test", strings.NewReader(""), &stdout, &stderr)
+	if code != exitUsage || !strings.Contains(stderr.String(), "--yes") {
+		t.Fatalf("code=%d stderr=%q", code, stderr.String())
 	}
 }

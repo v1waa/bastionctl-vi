@@ -88,7 +88,7 @@ func Doctor(ctx context.Context, cfg config.AdminConfig, version, identity strin
 
 func Run(ctx context.Context, cfg config.AdminConfig, version string, options Options) *report.Report {
 	r := report.New(version, "admin", options.Action, options.Target)
-	if options.Action != "audit" && options.Action != "plan" && options.Action != "apply" {
+	if options.Action != "audit" && options.Action != "plan" && options.Action != "apply" && options.Action != "reset-plan" && options.Action != "reset" {
 		r.Add(report.Result{Control: "arguments", Status: report.Fail, Severity: "critical", Message: "неизвестное удалённое действие"})
 		return r
 	}
@@ -100,12 +100,12 @@ func Run(ctx context.Context, cfg config.AdminConfig, version string, options Op
 		r.Add(report.Result{Control: "port", Status: report.Fail, Severity: "critical", Message: "SSH-порт должен быть в диапазоне 1..65535"})
 		return r
 	}
-	if options.Action == "apply" && !options.Yes {
-		r.Add(report.Result{Control: "confirmation", Status: report.Fail, Severity: "critical", Message: "admin apply требует явный флаг --yes"})
+	if (options.Action == "apply" || options.Action == "reset") && !options.Yes {
+		r.Add(report.Result{Control: "confirmation", Status: report.Fail, Severity: "critical", Message: "admin " + options.Action + " требует явный флаг --yes"})
 		return r
 	}
 	remoteParts := []string{"sudo", "-n", cfg.RemoteExecutable, "server", options.Action, "--config", cfg.RemoteConfig, "--json"}
-	if options.Action == "apply" {
+	if options.Action == "apply" || options.Action == "reset" {
 		remoteParts = append(remoteParts, "--yes")
 	}
 	stdout, stderr, commandErr := runRawSSH(ctx, cfg, options, remoteCommand(remoteParts), 15*time.Minute)

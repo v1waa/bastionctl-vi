@@ -317,11 +317,11 @@ func (c *Controller) ApplyProfile(id, name string) error {
 }
 
 func (c *Controller) RunAction(ctx context.Context, id, action string, yes bool) (*OperationResult, error) {
-	if action != "audit" && action != "plan" && action != "apply" {
-		return nil, errors.New("действие должно быть audit, plan или apply")
+	if action != "audit" && action != "plan" && action != "apply" && action != "reset-plan" && action != "reset" {
+		return nil, errors.New("действие должно быть audit, plan, apply, reset-plan или reset")
 	}
-	if action == "apply" && !yes {
-		return nil, errors.New("apply требует явного подтверждения")
+	if (action == "apply" || action == "reset") && !yes {
+		return nil, fmt.Errorf("%s требует явного подтверждения", action)
 	}
 	item, err := c.Store.Server(id)
 	if err != nil {
@@ -369,6 +369,57 @@ func (c *Controller) RunAction(ctx context.Context, id, action string, yes bool)
 	}
 	item, _ = c.Store.Server(id)
 	return &OperationResult{Server: item, Report: r, NewFindings: newFindings, HistoryPath: historyPath}, nil
+}
+
+func (c *Controller) CreateUser(ctx context.Context, id, username, publicKey string, grantSudo bool) (*OperationResult, error) {
+	item, err := c.Store.Server(id)
+	if err != nil {
+		return nil, err
+	}
+	if item.BootstrapPending {
+		return nil, errors.New("сначала выполните первичный SSH-вход: fleet bootstrap " + item.ID)
+	}
+	cfg, err := config.Load(item.ConfigPath)
+	if err != nil {
+		return nil, err
+	}
+	r := admin.CreateUser(ctx, cfg.Admin, c.Version, admin.CreateUserOptions{
+		Connection: admin.Options{Target: item.Target, Port: item.Port, Identity: item.Identity},
+		Username:   username, PublicKey: publicKey, GrantSudo: grantSudo,
+	})
+	historyPath, err := c.Store.SaveReport(id, r)
+	if err != nil {
+		return nil, err
+	}
+	item.LastAction = "user-add"
+	if r.HasFailures() {
+		item.LastStatus = "fail"
+	} else {
+		item.LastStatus = "ok"
+	}
+	if !transportFailed(r) {
+		item.LastSeenAt = time.Now().UTC()
+	}
+	if err := c.Store.UpdateServer(item); err != nil {
+		return nil, err
+	}
+	item, _ = c.Store.Server(id)
+	return &OperationResult{Server: item, Report: r, HistoryPath: historyPath}, nil
+}
+
+func (c *Controller) SetUserPassword(ctx context.Context, id, username string, input io.Reader, output io.Writer) error {
+	item, err := c.Store.Server(id)
+	if err != nil {
+		return err
+	}
+	if item.BootstrapPending {
+		return errors.New("сначала завершите первичный SSH-вход")
+	}
+	cfg, err := config.Load(item.ConfigPath)
+	if err != nil {
+		return err
+	}
+	return admin.SetUserPassword(ctx, cfg.Admin, admin.Options{Target: item.Target, Port: item.Port, Identity: item.Identity}, username, input, output)
 }
 
 func (c *Controller) AuditAll(ctx context.Context) ([]FleetResult, error) {

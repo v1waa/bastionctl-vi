@@ -3,10 +3,13 @@
 package server
 
 import (
+	"context"
 	"net"
 	"os"
+	"os/user"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"bastionctl/internal/config"
@@ -95,5 +98,120 @@ func TestTrailingPort(t *testing.T) {
 		if !ok || port != expected {
 			t.Fatalf("%s: %d %v", input, port, ok)
 		}
+	}
+}
+
+func TestTaggedUFWRulesAreDeletedInDescendingOrder(t *testing.T) {
+	output := `Status: active
+
+[ 1] 22/tcp ALLOW IN Anywhere # bastionctl-ssh
+[ 2] 443/tcp ALLOW IN Anywhere # customer-rule
+[ 3] 8080/tcp ALLOW IN Anywhere # keep-bastionctl-service-copy
+[12] 51820/udp ALLOW IN Anywhere # bastionctl-service
+[ 4] 22/tcp (v6) ALLOW IN Anywhere (v6) # bastionctl-ssh`
+	want := []int{12, 4, 1}
+	if got := taggedUFWRules(output); !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+}
+
+func TestTaggedUFWRulesCanBeFilteredBySafetyKind(t *testing.T) {
+	output := "[ 1] 22/tcp ALLOW IN Anywhere # bastionctl-ssh\n[ 7] 443/tcp ALLOW IN Anywhere # bastionctl-service\n"
+	if got := taggedUFWRulesByKind(output, "ssh"); !reflect.DeepEqual(got, []int{1}) {
+		t.Fatalf("ssh rules: %v", got)
+	}
+	if got := taggedUFWRulesByKind(output, "service"); !reflect.DeepEqual(got, []int{7}) {
+		t.Fatalf("service rules: %v", got)
+	}
+}
+
+func TestResettableUFWRulesPreserveSSHUnderDefaultDeny(t *testing.T) {
+	directory := t.TempDir()
+	ufw := filepath.Join(directory, "ufw")
+	if err := os.WriteFile(ufw, []byte("#!/bin/sh\nprintf '%s\\n' 'Status: active' 'Default: deny (incoming), allow (outgoing)'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", directory+string(os.PathListSeparator)+os.Getenv("PATH"))
+	numbered := "[ 1] 22/tcp ALLOW IN Anywhere # bastionctl-ssh\n[ 7] 443/tcp ALLOW IN Anywhere # bastionctl-service\n"
+	deletable, preserved, warning := resettableUFWRules(context.Background(), numbered)
+	if !reflect.DeepEqual(deletable, []int{7}) || !reflect.DeepEqual(preserved, []int{1}) || warning == "" {
+		t.Fatalf("deletable=%v preserved=%v warning=%q", deletable, preserved, warning)
+	}
+}
+
+func TestResettableUFWRulesPreserveSSHWhenPolicyIsUnclear(t *testing.T) {
+	directory := t.TempDir()
+	ufw := filepath.Join(directory, "ufw")
+	if err := os.WriteFile(ufw, []byte("#!/bin/sh\nprintf '%s\\n' 'Status output is localized'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", directory+string(os.PathListSeparator)+os.Getenv("PATH"))
+	numbered := "[ 2] 22/tcp ALLOW IN Anywhere # bastionctl-ssh\n[ 8] 443/tcp ALLOW IN Anywhere # bastionctl-service\n"
+	deletable, preserved, warning := resettableUFWRules(context.Background(), numbered)
+	if !reflect.DeepEqual(deletable, []int{8}) || !reflect.DeepEqual(preserved, []int{2}) || warning == "" {
+		t.Fatalf("deletable=%v preserved=%v warning=%q", deletable, preserved, warning)
+	}
+}
+
+func TestInspectResetFileRequiresOwnershipMarker(t *testing.T) {
+	directory := t.TempDir()
+	managed := filepath.Join(directory, "managed.conf")
+	foreign := filepath.Join(directory, "foreign.conf")
+	lookalike := filepath.Join(directory, "lookalike.conf")
+	if err := os.WriteFile(managed, []byte("# Managed by bastionctl.\nvalue=1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(foreign, []byte("value=1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(lookalike, []byte("# Not Managed by bastionctl.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if owned, exists, err := inspectResetFile(managed); err != nil || !owned || !exists {
+		t.Fatalf("managed: owned=%v exists=%v err=%v", owned, exists, err)
+	}
+	if owned, exists, err := inspectResetFile(foreign); err != nil || owned || !exists {
+		t.Fatalf("foreign: owned=%v exists=%v err=%v", owned, exists, err)
+	}
+	if owned, exists, err := inspectResetFile(lookalike); err != nil || owned || !exists {
+		t.Fatalf("lookalike: owned=%v exists=%v err=%v", owned, exists, err)
+	}
+}
+
+func TestInstallAuthorizedKeyAppendsAndIsIdempotent(t *testing.T) {
+	home := t.TempDir()
+	account := &user.User{Username: "testuser", HomeDir: home}
+	uid, gid := os.Getuid(), os.Getgid()
+	path, added, err := installAuthorizedKey(account, uid, gid, userTestPublicKey())
+	if err != nil || !added {
+		t.Fatalf("first add path=%q added=%v err=%v", path, added, err)
+	}
+	sameKeyNewComment := strings.TrimSuffix(userTestPublicKey(), " server-test") + " another-comment"
+	pathAgain, addedAgain, err := installAuthorizedKey(account, uid, gid, sameKeyNewComment)
+	if err != nil || addedAgain || pathAgain != path {
+		t.Fatalf("second add path=%q added=%v err=%v", pathAgain, addedAgain, err)
+	}
+	content, err := os.ReadFile(path)
+	if err != nil || strings.Count(string(content), "ssh-ed25519 ") != 1 {
+		t.Fatalf("authorized_keys=%q err=%v", content, err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("mode=%v", info.Mode().Perm())
+	}
+}
+
+func TestInstallAuthorizedKeyRejectsSymlinkDirectory(t *testing.T) {
+	home := t.TempDir()
+	target := t.TempDir()
+	if err := os.Symlink(target, filepath.Join(home, ".ssh")); err != nil {
+		t.Fatal(err)
+	}
+	account := &user.User{Username: "testuser", HomeDir: home}
+	if _, _, err := installAuthorizedKey(account, os.Getuid(), os.Getgid(), userTestPublicKey()); err == nil {
+		t.Fatal("symlink .ssh must be rejected")
 	}
 }

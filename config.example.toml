@@ -1,4 +1,7 @@
 # Copy to /etc/bastionctl/config.toml on the server and review every value.
+# `user-add` uses this policy's SSH daemon/firewall but never stores a private
+# key here. `reset` keeps this file so the same managed server can be hardened
+# again; it removes only marked security drop-ins and tagged UFW rules.
 
 [server]
 profile = "minimal"

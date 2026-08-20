@@ -59,7 +59,7 @@ func Run(ctx context.Context, args []string, version string, stdin io.Reader, st
 		if len(args) < 2 {
 			return usageError(stderr, "server требует действие")
 		}
-		return runServer(ctx, args[1], args[2:], version, stdout, stderr)
+		return runServer(ctx, args[1], args[2:], version, stdin, stdout, stderr)
 	case "admin":
 		if len(args) < 2 {
 			return usageError(stderr, "admin требует действие")
@@ -92,12 +92,12 @@ func runConsole(ctx context.Context, args []string, version string, stdin io.Rea
 	return console.Run(ctx, control, stdin, stdout, stderr)
 }
 
-func runServer(ctx context.Context, action string, args []string, version string, stdout, stderr io.Writer) int {
-	if action != "audit" && action != "plan" && action != "apply" && action != "snapshot" {
-		return usageError(stderr, "server поддерживает audit, plan, apply и snapshot")
+func runServer(ctx context.Context, action string, args []string, version string, stdin io.Reader, stdout, stderr io.Writer) int {
+	if action != "audit" && action != "plan" && action != "apply" && action != "snapshot" && action != "reset-plan" && action != "reset" && action != "user-add" {
+		return usageError(stderr, "server поддерживает audit, plan, apply, snapshot, reset-plan, reset и user-add")
 	}
 	specification := map[string]bool{"--config": true, "--json": false}
-	if action == "apply" {
+	if action == "apply" || action == "reset" || action == "user-add" {
 		specification["--yes"] = false
 	}
 	parsed, err := parse(args, specification)
@@ -129,15 +129,28 @@ func runServer(ctx context.Context, action string, args []string, version string
 		}
 		return exitOK
 	}
-	if action == "apply" && !parsed.booleans["--yes"] {
-		return usageError(stderr, "server apply требует --yes после проверки audit и plan")
+	if action == "user-add" {
+		if !parsed.booleans["--yes"] {
+			return usageError(stderr, "server user-add требует --yes и JSON-запрос в stdin")
+		}
+		r := server.CreateUser(ctx, cfg, version, stdin, true)
+		if err := writeReport(stdout, r, parsed.booleans["--json"]); err != nil {
+			return outputError(stderr, err)
+		}
+		if r.HasFailures() {
+			return exitPermission
+		}
+		return exitOK
+	}
+	if (action == "apply" || action == "reset") && !parsed.booleans["--yes"] {
+		return usageError(stderr, "server "+action+" требует --yes после отдельного плана")
 	}
 	r := server.Run(ctx, cfg, version, server.Options{Action: action, ConfigPath: configPath, Yes: parsed.booleans["--yes"]})
 	if err := writeReport(stdout, r, parsed.booleans["--json"]); err != nil {
 		return outputError(stderr, err)
 	}
 	if r.HasFailures() {
-		if action == "apply" {
+		if action == "apply" || action == "reset" {
 			return exitPermission
 		}
 		return exitFindings
@@ -148,7 +161,7 @@ func runServer(ctx context.Context, action string, args []string, version string
 func runAdmin(ctx context.Context, action string, args []string, version string, stdin io.Reader, stdout, stderr io.Writer) int {
 	specification, known := adminSpecification(action)
 	if !known {
-		return usageError(stderr, "admin поддерживает doctor, audit, plan, apply, snapshot и install")
+		return usageError(stderr, "admin поддерживает doctor, audit, plan, apply, snapshot, install, reset-plan, reset и user-add")
 	}
 	parsed, err := parse(args, specification)
 	if err != nil {
@@ -203,9 +216,30 @@ func runAdmin(ctx context.Context, action string, args []string, version string,
 			Input: stdin, Output: stderr,
 		})
 		return finishAdminReport(r, jsonOutput, stdout, stderr)
+	case "user-add":
+		if !parsed.booleans["--yes"] || parsed.values["--username"] == "" || parsed.values["--public-key"] == "" {
+			return usageError(stderr, "admin user-add требует --username NAME --public-key PATH --yes")
+		}
+		if parsed.booleans["--set-password"] && !parsed.booleans["--sudo"] {
+			return usageError(stderr, "--set-password используется только вместе с --sudo")
+		}
+		publicKey, err := admin.ReadPublicKey(admin.ExpandIdentity(parsed.values["--public-key"]))
+		if err != nil {
+			return usageError(stderr, err.Error())
+		}
+		r := admin.CreateUser(ctx, cfg.Admin, version, admin.CreateUserOptions{
+			Connection: connection, Username: parsed.values["--username"], PublicKey: publicKey, GrantSudo: parsed.booleans["--sudo"],
+		})
+		code := finishAdminReport(r, jsonOutput, stdout, stderr)
+		if code == exitOK && parsed.booleans["--set-password"] {
+			if err := admin.SetUserPassword(ctx, cfg.Admin, connection, parsed.values["--username"], stdin, stderr); err != nil {
+				return commandError(stderr, err)
+			}
+		}
+		return code
 	default:
-		if action == "apply" && !parsed.booleans["--yes"] {
-			return usageError(stderr, "admin apply требует --yes после проверки audit и plan")
+		if (action == "apply" || action == "reset") && !parsed.booleans["--yes"] {
+			return usageError(stderr, "admin "+action+" требует --yes после отдельного плана")
 		}
 		r := admin.Run(ctx, cfg.Admin, version, connection)
 		return finishAdminReport(r, jsonOutput, stdout, stderr)
@@ -216,9 +250,9 @@ func adminSpecification(action string) (map[string]bool, bool) {
 	specification := map[string]bool{"--json": false, "--config": true, "--identity": true}
 	switch action {
 	case "doctor":
-	case "audit", "plan", "snapshot":
+	case "audit", "plan", "snapshot", "reset-plan":
 		specification["--port"] = true
-	case "apply":
+	case "apply", "reset":
 		specification["--port"] = true
 		specification["--yes"] = false
 	case "install":
@@ -226,6 +260,13 @@ func adminSpecification(action string) (map[string]bool, bool) {
 		specification["--binary"] = true
 		specification["--install-sudo"] = false
 		specification["--interactive-sudo"] = false
+	case "user-add":
+		specification["--port"] = true
+		specification["--username"] = true
+		specification["--public-key"] = true
+		specification["--sudo"] = false
+		specification["--set-password"] = false
+		specification["--yes"] = false
 	default:
 		return nil, false
 	}
@@ -313,13 +354,13 @@ func runFleet(ctx context.Context, action string, args []string, version string,
 			_, _ = fmt.Fprintf(stdout, "Ключевой SSH-вход проверен: %s\n", item.Target)
 		}
 		return exitOK
-	case "audit", "plan", "apply":
+	case "audit", "plan", "apply", "reset-plan", "reset":
 		id, ok := oneID(parsed, stderr)
 		if !ok {
 			return exitUsage
 		}
-		if action == "apply" && !parsed.booleans["--yes"] {
-			return usageError(stderr, "fleet apply требует --yes после отдельного fleet plan")
+		if (action == "apply" || action == "reset") && !parsed.booleans["--yes"] {
+			return usageError(stderr, "fleet "+action+" требует --yes после отдельного плана")
 		}
 		result, err := control.RunAction(ctx, id, action, parsed.booleans["--yes"])
 		if err != nil {
@@ -330,6 +371,37 @@ func runFleet(ctx context.Context, action string, args []string, version string,
 		}
 		if result.Report.HasFailures() {
 			return exitFindings
+		}
+		return exitOK
+	case "user-add":
+		id, ok := oneID(parsed, stderr)
+		if !ok {
+			return exitUsage
+		}
+		if !parsed.booleans["--yes"] || parsed.values["--username"] == "" || parsed.values["--public-key"] == "" {
+			return usageError(stderr, "fleet user-add требует --username NAME --public-key PATH --yes")
+		}
+		if parsed.booleans["--set-password"] && !parsed.booleans["--sudo"] {
+			return usageError(stderr, "--set-password используется только вместе с --sudo")
+		}
+		publicKey, err := admin.ReadPublicKey(admin.ExpandIdentity(parsed.values["--public-key"]))
+		if err != nil {
+			return usageError(stderr, err.Error())
+		}
+		result, err := control.CreateUser(ctx, id, parsed.values["--username"], publicKey, parsed.booleans["--sudo"])
+		if err != nil {
+			return commandError(stderr, err)
+		}
+		if err := writeOperation(stdout, result, jsonOutput); err != nil {
+			return outputError(stderr, err)
+		}
+		if result.Report.HasFailures() {
+			return exitFindings
+		}
+		if parsed.booleans["--set-password"] {
+			if err := control.SetUserPassword(ctx, id, parsed.values["--username"], stdin, stderr); err != nil {
+				return commandError(stderr, err)
+			}
 		}
 		return exitOK
 	case "install":
@@ -471,7 +543,7 @@ func fleetSpecification(action string) (map[string]bool, bool) {
 	specification := map[string]bool{"--state-dir": true, "--json": false}
 	add := func(name string, value bool) { specification[name] = value }
 	switch action {
-	case "list", "profiles", "diff", "audit", "plan", "audit-all", "bootstrap":
+	case "list", "profiles", "diff", "audit", "plan", "reset-plan", "audit-all", "bootstrap":
 	case "add":
 		for _, name := range []string{"--name", "--port", "--identity", "--profile", "--ssh-cidrs", "--tcp-ports", "--udp-ports", "--backup-markers", "--backup-max-age", "--server-binary"} {
 			add(name, true)
@@ -487,7 +559,13 @@ func fleetSpecification(action string) (map[string]bool, bool) {
 		for _, name := range []string{"--backup-required", "--backup-optional", "--accept-new-host-key", "--strict-host-key"} {
 			add(name, false)
 		}
-	case "remove", "apply", "baseline":
+	case "remove", "apply", "reset", "baseline":
+		add("--yes", false)
+	case "user-add":
+		add("--username", true)
+		add("--public-key", true)
+		add("--sudo", false)
+		add("--set-password", false)
 		add("--yes", false)
 	case "install":
 		add("--binary", true)
@@ -924,6 +1002,9 @@ func Help(version string) string {
   bastionctl fleet install ID [--binary PATH] [--interactive-sudo]
   bastionctl fleet audit|plan ID [--json]
   bastionctl fleet apply ID --yes [--json]
+  bastionctl fleet user-add ID --username NAME --public-key PATH --yes [--sudo --set-password]
+  bastionctl fleet reset-plan ID [--json]
+  bastionctl fleet reset ID --yes [--json]
   bastionctl fleet audit-all [--json]
   bastionctl fleet snapshot ID [--baseline] [--json]
   bastionctl fleet diff ID [--json]
@@ -936,6 +1017,9 @@ func Help(version string) string {
   bastionctl server audit|plan [--config PATH] [--json]
   bastionctl server apply --yes [--config PATH] [--json]
   bastionctl server snapshot [--config PATH] [--json]
+  bastionctl server reset-plan [--config PATH] [--json]
+  bastionctl server reset --yes [--config PATH] [--json]
+  bastionctl server user-add --yes [--config PATH] [--json] < request.json
 
 Прямой admin-режим:
   bastionctl admin doctor [--identity PATH] [--json]
@@ -943,10 +1027,15 @@ func Help(version string) string {
   bastionctl admin apply USER@HOST --yes [--port N] [--identity PATH] [--json]
   bastionctl admin snapshot USER@HOST [--config PATH] [--json]
   bastionctl admin install USER@HOST --binary PATH --config PATH [--install-sudo] [--interactive-sudo]
+  bastionctl admin user-add USER@HOST --username NAME --public-key PATH --yes [--sudo --set-password]
+  bastionctl admin reset-plan USER@HOST [--config PATH] [--json]
+  bastionctl admin reset USER@HOST --yes [--config PATH] [--json]
 
 Гарантии процесса:
   audit, plan и snapshot ничего не меняют;
   apply требует отдельный plan и явное подтверждение;
+  reset требует отдельный reset-plan и удаляет только помеченную политику bastionctl;
+  user-add устанавливает только публичный Ed25519-ключ и не заменяет существующие ключи;
   пароль первого входа обрабатывает только OpenSSH и приложение его не хранит;
   после bootstrap SSH использует BatchMode и строгую проверку host key;
   перед включением firewall проверяются ключ, sudo, sshd и текущая SSH-сессия.

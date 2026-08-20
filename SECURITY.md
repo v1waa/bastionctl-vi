@@ -13,7 +13,7 @@
 
 ## Safety properties
 
-- `audit` and `plan` are read-only.
+- `audit`, `plan`, `snapshot`, and `reset-plan` are read-only.
 - `apply` requires Linux, root, an explicit `--yes`, a supported platform, and
   an exclusive process lock.
 - Every enabled control completes preflight before configuration changes begin.
@@ -39,6 +39,18 @@
 - Remote installation verifies server architecture, local ELF metadata and
   SHA-256 after upload; a sudoers policy is validated with `visudo -cf` before
   root-owned installation.
+- `user-add` accepts a versioned JSON request through stdin of one fixed sudo
+  command. Both sides validate the conservative username and Ed25519 key. The
+  server opens `.ssh` and `authorized_keys` with no-follow semantics, checks
+  ownership and UID >= 1000, locks the file, and appends without replacing
+  existing keys. The private key never enters the application or server.
+- `reset` requires a separate plan and explicit confirmation. It uses a fixed
+  allowlist, checks the first-line `Managed by bastionctl` marker before file
+  removal, backs up each file, validates/activates the remaining configuration,
+  and deletes only UFW rules carrying a bastionctl comment. A tagged SSH allow
+  is retained when active deny/reject defaults could otherwise lock out the
+  operator. Reset never traverses or deletes user homes, application data,
+  accounts, or authorized keys.
 - Managed files reject symbolic links, use same-directory atomic replacement,
   preserve backups, and sync file-system metadata before reporting success.
 - Firewall rules preserve access by adding SSH allows before default-deny and
@@ -49,8 +61,9 @@
 
 ## Trust boundaries
 
-The local server binary runs as root during `apply` and therefore belongs to the
-trusted computing base. The admin binary delegates transport and host-key
+The local server binary runs as root during `apply`, `reset`, and `user-add` and
+therefore belongs to the trusted computing base. The admin binary delegates
+transport and host-key
 verification to the locally installed OpenSSH Client. JSON returned over that
 authenticated channel is schema-validated before display.
 
@@ -71,14 +84,18 @@ and `sysctl`) remain authoritative for their own configuration formats.
 This release does not remediate an already-rooted host, manage application
 secrets, prove backup recovery, change provider firewalls, enable disk
 encryption, rotate keys, or force Docker-published ports through UFW. It does
-not delete existing users, packages, services, or firewall rules. It is a
-baseline hardening assistant, not a compliance attestation.
+not delete existing users, packages, services, untagged firewall rules, home
+directories, or service data. Reset is removal of bastionctl-owned policy, not
+an operating-system factory reset. It is a baseline hardening assistant, not a
+compliance attestation.
 
 The application never collects an interactive sudo password. When requested,
 it allocates an SSH TTY and the remote `sudo` program reads the password itself.
-The generated ongoing policy grants only the exact bastionctl
-audit/plan/apply/snapshot commands. Replacing the root-owned executable remains
-outside that policy and can require another interactive sudo prompt.
+The generated ongoing policy grants only exact bastionctl
+audit/plan/apply/snapshot/reset-plan/reset/user-add commands. The variable
+user-add request travels through stdin rather than sudo command arguments.
+Replacing the root-owned executable remains outside that policy and can require
+another interactive sudo prompt.
 
 ## Failure and rollback limits
 
@@ -87,6 +104,14 @@ file metadata corrections, runtime sysctl transitions, service enablement, and
 UFW rule additions may have effects that cannot be transactionally reversed.
 The engine stops on the first apply failure, reports the backup directory, and
 never proceeds to firewall after an earlier failure.
+
+Reset deliberately preserves packages, shared service enablement, UFW
+enable/default policy, user accounts, and keys because their pre-bastionctl
+ownership cannot be proved. Removing the sysctl drop-in and running
+`sysctl --system` cannot reset a key that has no remaining source; a planned
+reboot is the authoritative boundary for those runtime-only values. A partial
+UFW deletion failure is reported with the pre-reset numbered status saved in
+the backup directory.
 
 ## Reporting a vulnerability
 

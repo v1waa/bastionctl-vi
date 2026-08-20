@@ -34,6 +34,5 @@ jobs:
       - name: Cross-platform release build
         if: matrix.go-version == 'stable'
         env:
-          VERSION: 1.1.0-ci
+          VERSION: 1.2.0-ci
         run: sh scripts/build.sh
-

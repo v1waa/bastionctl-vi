@@ -239,6 +239,69 @@ func TestBootstrapCommandSeparatesRootAndManagedUser(t *testing.T) {
 	}
 }
 
+func TestCreateUserSendsVersionedRequestThroughStdin(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test helper uses a POSIX script")
+	}
+	directory := t.TempDir()
+	ssh := filepath.Join(directory, "ssh")
+	payloadPath := filepath.Join(directory, "payload.json")
+	argsPath := filepath.Join(directory, "args.txt")
+	script := `#!/bin/sh
+IFS= read -r payload || true
+printf '%s\n' "$payload" > "$BASTIONCTL_TEST_PAYLOAD"
+printf '%s\n' "$*" > "$BASTIONCTL_TEST_ARGS"
+printf '%s\n' '{"schema":"bastionctl.report.v1","tool_version":"1.2.0","mode":"server","action":"user-add","started_at":"2026-01-01T00:00:00Z","finished_at":"2026-01-01T00:00:01Z","summary":{"pass":1,"fail":0,"warn":0,"info":0,"planned":0,"changed":0,"skipped":0},"results":[{"control":"ssh-login","status":"pass","message":"ok"}]}'
+`
+	if err := os.WriteFile(ssh, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", directory+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("BASTIONCTL_TEST_PAYLOAD", payloadPath)
+	t.Setenv("BASTIONCTL_TEST_ARGS", argsPath)
+	r := CreateUser(context.Background(), config.Defaults().Admin, "1.2.0", CreateUserOptions{
+		Connection: Options{Target: "ops@example.com", Port: 22}, Username: "alice",
+		PublicKey: testPublicKey(), GrantSudo: false,
+	})
+	if r.HasFailures() || len(r.Results) != 1 || r.Results[0].Control != "ssh-login" {
+		t.Fatalf("unexpected report: %+v", r)
+	}
+	payload, err := os.ReadFile(payloadPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(payload)
+	for _, expected := range []string{`"schema":"bastionctl.user-add.v1"`, `"username":"alice"`, `"public_key":"ssh-ed25519 `} {
+		if !strings.Contains(text, expected) {
+			t.Fatalf("missing %q in payload %s", expected, text)
+		}
+	}
+	args, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(args), "server' 'user-add") || strings.Contains(string(args), "alice") {
+		t.Fatalf("user data must stay out of sudo command arguments: %s", args)
+	}
+}
+
+func TestSudoersIncludesFixedResetAndUserCommands(t *testing.T) {
+	path, err := createSudoersFile("ops@example.com", config.Defaults().Admin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(path)
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{"server reset-plan", "server reset", "server user-add", "ops ALL=(root) NOPASSWD: BASTIONCTL"} {
+		if !strings.Contains(string(content), expected) {
+			t.Fatalf("missing %q in sudoers: %s", expected, content)
+		}
+	}
+}
+
 func testPublicKey() string {
 	var blob bytes.Buffer
 	write := func(value []byte) {

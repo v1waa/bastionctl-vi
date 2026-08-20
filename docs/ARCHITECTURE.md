@@ -18,12 +18,13 @@
 | `cmd/bastionctl` | entry point, сигналы, версия сборки |
 | `internal/cli` | команды, параметры, коды завершения, JSON/text |
 | `internal/console` | интерактивное меню администратора и подтверждения |
-| `internal/controller` | операции над реестром, установка, история, snapshots |
+| `internal/controller` | реестр, установка, пользователи, reset, история, snapshots |
 | `internal/state` | атомарное локальное хранилище и подписи Ed25519 |
 | `internal/config` | строгий TOML subset, defaults, validation, rendering |
 | `internal/profile` | встроенные стартовые политики сервисов |
 | `internal/admin` | диагностика, проверка target, безопасные `ssh`/`scp` |
 | `internal/server` | Linux-контроли, preflight, apply, backup/rollback |
+| `internal/sshkey` | единая проверка usernames, Ed25519-ключей и fingerprints |
 | `internal/inventory` | snapshot и детерминированный drift diff |
 | `internal/explain` | назначение, риск, проверка и откат контролей |
 | `internal/report` | `bastionctl.report.v1` и renderers |
@@ -41,6 +42,8 @@ flowchart LR
     A -->|OpenSSH| R[Server mode via sudo -n]
     R --> P[Preflight + controls]
     R --> I[Inventory snapshot]
+    R --> U[Key-only user creation]
+    R --> X[Owned-policy reset]
     I --> A
     A --> C
     C -->|sign, history, diff| S
@@ -73,6 +76,42 @@ flowchart TD
 точную строку `APPLY <server-id>`. Низкоуровневый CLI требует `--yes`, чтобы
 оставаться пригодным для автоматизации.
 
+## Жизненный цикл reset
+
+```mermaid
+flowchart TD
+    A[reset-plan: inspect allowlist] --> B[Exact RESET confirmation]
+    B --> C[Root lock + backup directory]
+    C --> D[Check first-line ownership marker]
+    D -->|foreign or missing| E[Preserve and report]
+    D -->|owned| F[Remove one drop-in]
+    F --> G[Validate and activate remaining config]
+    G -->|failed| H[Restore that file]
+    G -->|passed| I[Next file]
+    I --> J[Delete safe tagged UFW rules, descending]
+```
+
+Reset не пытается реконструировать неизвестное состояние ОС до установки.
+Пакеты, shared service state, UFW enable/default policy, аккаунты,
+`authorized_keys`, home и данные приложений остаются неизменными. Это делает
+операцию идемпотентной и ограничивает область записи явным allowlist.
+При active UFW с deny/reject incoming помеченный SSH allow сохраняется: reset
+не должен превращать отмену hardening в потерю управления сервером.
+
+## Создание пользователя
+
+Публичный ключ нормализуется на admin-ПК и повторно на сервере. Версионированный
+JSON `bastionctl.user-add.v1` передаётся через stdin фиксированной sudo-команды,
+поэтому username и ключ не расширяют sudo command line. Сервер допускает только
+UID >= 1000, обычный home без symlink и login shell. `.ssh` открывается как
+каталог с `O_NOFOLLOW`; `authorized_keys` открывается относительно descriptor
+через `openat`, блокируется, проверяется и только дополняется. Закрытый ключ в
+этот поток не входит.
+
+Роль sudo опциональна. После добавления группы пароль задаётся отдельным
+интерактивным `sudo passwd`; его байты остаются между терминалом, OpenSSH и
+удалёнными `sudo`/`passwd`.
+
 ## Модель изменения файлов
 
 Для каждого управляемого серверного файла:
@@ -85,7 +124,8 @@ flowchart TD
 6. при ошибке восстанавливается прежний файл.
 
 Установка пакетов, исправление metadata и правила UFW честно отмечаются как
-нетранзакционные операции.
+нетранзакционные операции. Reset сохраняет исходный numbered status UFW перед
+удалением помеченных правил и сообщает частичный результат при ошибке.
 
 ## SSH и bootstrap
 
@@ -105,7 +145,9 @@ Installer сначала определяет `uname -m`, проверяет ELF
 sudoers через `visudo -cf`, затем устанавливает root-owned файлы. Первый вход
 может установить ключ существующему пользователю либо при входе от root создать
 непривилегированного администратора. Пароли обрабатывают только OpenSSH,
-удалённый `passwd` и `sudo`; приложение не получает их байты.
+удалённый `passwd` и `sudo`; приложение не получает их байты. В sudoers также
+перечислены точные `reset-plan`, `reset` и `user-add`; переменный запрос
+`user-add` поступает только через stdin.
 
 ## Локальное состояние
 

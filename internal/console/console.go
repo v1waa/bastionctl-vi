@@ -92,10 +92,14 @@ func (ui *UI) loop() error {
 			ui.runWithServer(ui.remove)
 		case "13", "bootstrap":
 			ui.runWithServer(ui.bootstrap)
+		case "14", "user", "user-add":
+			ui.runWithServer(ui.createUser)
+		case "15", "reset":
+			ui.runWithServer(ui.resetPolicy)
 		case "":
 			continue
 		default:
-			_, _ = fmt.Fprintln(ui.errOut, "Неизвестная команда. Выберите номер 0–13.")
+			_, _ = fmt.Fprintln(ui.errOut, "Неизвестная команда. Выберите номер 0–15.")
 		}
 	}
 }
@@ -113,7 +117,8 @@ func (ui *UI) menu() {
   4. Аудит                     10. Аудит всех серверов
   5. План                      11. Объяснить контроль
   6. Применить                 12. Удалить из реестра
-                               13. Первичный SSH-вход
+ 13. Первичный SSH-вход        14. Создать SSH-пользователя
+ 15. Сбросить политику
   0. Выход
 `, selected)
 }
@@ -362,6 +367,113 @@ func (ui *UI) apply(item state.ManagedServer) error {
 		return nil
 	}
 	result, err := ui.control.RunAction(ui.ctx, item.ID, "apply", true)
+	if err != nil {
+		return err
+	}
+	return ui.printOperation(result)
+}
+
+func (ui *UI) createUser(item state.ManagedServer) error {
+	_, _ = fmt.Fprintln(ui.out, "\nНовый пользователь получит key-only SSH-вход. Закрытый ключ не передаётся на сервер и не хранится bastionctl.")
+	_, _ = fmt.Fprintln(ui.out, "На другом ПК выполните: ssh-keygen -t ed25519, затем скопируйте сюда только строку из файла с расширением .pub.")
+	username, err := ui.prompt("Имя Linux-пользователя", "")
+	if err != nil {
+		return err
+	}
+	keyInput, err := ui.prompt("Публичный ключ Ed25519 или @путь-к-файлу.pub", "")
+	if err != nil {
+		return err
+	}
+	publicKey := ""
+	fingerprint := ""
+	if strings.HasPrefix(keyInput, "@") {
+		path := admin.ExpandIdentity(strings.TrimSpace(strings.TrimPrefix(keyInput, "@")))
+		publicKey, err = admin.ReadPublicKey(path)
+		if err == nil {
+			_, fingerprint, err = admin.NormalizePublicKey(publicKey)
+		}
+	} else {
+		publicKey, fingerprint, err = admin.NormalizePublicKey(keyInput)
+	}
+	if err != nil {
+		return err
+	}
+	grantSudo, err := ui.promptBool("Добавить пользователя в группу sudo", false)
+	if err != nil {
+		return err
+	}
+	cfg, err := ui.control.Config(item.ID)
+	if err != nil {
+		return err
+	}
+	role := "обычный пользователь без sudo"
+	if grantSudo {
+		role = "администратор sudo; после создания потребуется отдельный пароль"
+	}
+	allowedSources := "любой адрес, разрешённый внешним firewall"
+	if len(cfg.Server.SSHAllowedCIDRs) > 0 {
+		allowedSources = strings.Join(cfg.Server.SSHAllowedCIDRs, ", ")
+	}
+	_, _ = fmt.Fprintf(ui.out, "Пользователь: %s\nРоль: %s\nКлюч: %s\nРазрешённые источники SSH: %s\n", username, role, fingerprint, allowedSources)
+	expected := "CREATE " + username
+	confirmation, err := ui.prompt("Для создания введите "+expected, "")
+	if err != nil {
+		return err
+	}
+	if confirmation != expected {
+		_, _ = fmt.Fprintln(ui.out, "Отменено: подтверждение не совпало.")
+		return nil
+	}
+	result, err := ui.control.CreateUser(ui.ctx, item.ID, username, publicKey, grantSudo)
+	if err != nil {
+		return err
+	}
+	if err := ui.printOperation(result); err != nil {
+		return err
+	}
+	if result.Report.HasFailures() {
+		return errors.New("создание пользователя завершилось с ошибками; проверьте отчёт и не повторяйте вслепую")
+	}
+	if grantSudo {
+		setNow, promptErr := ui.promptBool("Задать sudo-пароль сейчас в защищённом удалённом терминале", true)
+		if promptErr != nil {
+			return promptErr
+		}
+		if setNow {
+			_, _ = fmt.Fprintln(ui.out, "sudo может сначала запросить пароль текущего администратора, затем дважды новый пароль. bastionctl эти значения не читает и не сохраняет.")
+			if err := ui.control.SetUserPassword(ui.ctx, item.ID, username, ui.input, ui.out); err != nil {
+				return err
+			}
+		}
+	}
+	_, host := splitTargetForDisplay(item.Target)
+	_, _ = fmt.Fprintf(ui.out, "Вход с другого ПК: ssh -p %d %s@%s\n", item.Port, username, host)
+	return nil
+}
+
+func (ui *UI) resetPolicy(item state.ManagedServer) error {
+	_, _ = fmt.Fprintln(ui.out, "\nСначала строится read-only план сброса. Он удалит только файлы с маркером bastionctl и правила UFW с комментариями bastionctl-*. ")
+	plan, err := ui.control.RunAction(ui.ctx, item.ID, "reset-plan", false)
+	if err != nil {
+		return err
+	}
+	if err := ui.printOperation(plan); err != nil {
+		return err
+	}
+	if plan.Report.HasFailures() {
+		return errors.New("сброс заблокирован: reset-plan содержит ошибки")
+	}
+	_, _ = fmt.Fprintln(ui.out, "Не удаляются: пользовательские файлы, домашние каталоги, аккаунты, authorized_keys, пакеты, сторонние firewall-правила и локальная история.")
+	expected := "RESET " + item.ID
+	confirmation, err := ui.prompt("Для полного сброса политики bastionctl введите "+expected, "")
+	if err != nil {
+		return err
+	}
+	if confirmation != expected {
+		_, _ = fmt.Fprintln(ui.out, "Отменено: подтверждение не совпало.")
+		return nil
+	}
+	result, err := ui.control.RunAction(ui.ctx, item.ID, "reset", true)
 	if err != nil {
 		return err
 	}
@@ -686,6 +798,14 @@ func formatTarget(username, host string) string {
 		host = "[" + host + "]"
 	}
 	return username + "@" + host
+}
+
+func splitTargetForDisplay(target string) (string, string) {
+	index := strings.LastIndex(target, "@")
+	if index <= 0 || index == len(target)-1 {
+		return "", target
+	}
+	return target[:index], target[index+1:]
 }
 
 func parsePort(value string) (int, error) {

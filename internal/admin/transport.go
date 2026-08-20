@@ -65,6 +65,10 @@ func remoteCommand(parts []string) string {
 }
 
 func runRawSSH(ctx context.Context, cfg config.AdminConfig, options Options, command string, timeout time.Duration) ([]byte, []byte, error) {
+	return runRawSSHInput(ctx, cfg, options, command, nil, timeout)
+}
+
+func runRawSSHInput(ctx context.Context, cfg config.AdminConfig, options Options, command string, input io.Reader, timeout time.Duration) ([]byte, []byte, error) {
 	if err := validateConnection(options); err != nil {
 		return nil, nil, err
 	}
@@ -77,6 +81,7 @@ func runRawSSH(ctx context.Context, cfg config.AdminConfig, options Options, com
 	commandCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	cmd := exec.CommandContext(commandCtx, sshPath, args...)
+	cmd.Stdin = input
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

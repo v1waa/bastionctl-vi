@@ -2,20 +2,18 @@ package admin
 
 import (
 	"context"
-	"encoding/base64"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
 	"bastionctl/internal/config"
+	"bastionctl/internal/sshkey"
 )
 
 type BootstrapOptions struct {
@@ -26,13 +24,8 @@ type BootstrapOptions struct {
 	Output        io.Writer
 }
 
-var bootstrapUsernamePattern = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,31}$`)
-
 func ValidateBootstrapUsername(username string) error {
-	if username == "root" || !bootstrapUsernamePattern.MatchString(username) {
-		return errors.New("имя нового администратора должно содержать 1–32 символа: a-z, 0-9, _ или - и не может быть root")
-	}
-	return nil
+	return sshkey.ValidateUsername(username)
 }
 
 func GenerateIdentity(ctx context.Context, path, comment string) error {
@@ -96,30 +89,12 @@ func GenerateIdentity(ctx context.Context, path, comment string) error {
 }
 
 func ReadPublicKey(path string) (string, error) {
-	info, err := os.Lstat(path)
-	if err != nil {
-		return "", fmt.Errorf("публичный ключ недоступен: %w", err)
-	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Size() < 1 || info.Size() > 16<<10 {
-		return "", errors.New("публичный ключ должен быть небольшим обычным файлом без symlink")
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return "", err
-	}
-	line := strings.TrimSpace(string(data))
-	if line == "" || strings.ContainsAny(line, "\r\n\x00") {
-		return "", errors.New("публичный ключ должен занимать одну строку")
-	}
-	fields := strings.Fields(line)
-	if len(fields) < 2 || len(fields) > 3 || fields[0] != "ssh-ed25519" {
-		return "", errors.New("bootstrap поддерживает только публичный ключ Ed25519")
-	}
-	blob, err := base64.StdEncoding.DecodeString(fields[1])
-	if err != nil || !validEd25519Blob(blob) {
-		return "", errors.New("публичный ключ Ed25519 имеет некорректный формат")
-	}
-	return strings.Join(fields, " "), nil
+	value, _, err := sshkey.ReadPublicKey(path)
+	return value, err
+}
+
+func NormalizePublicKey(value string) (string, string, error) {
+	return sshkey.NormalizePublicKey(value)
 }
 
 func BootstrapKey(ctx context.Context, cfg config.AdminConfig, options BootstrapOptions) error {
@@ -249,27 +224,6 @@ func validateGeneratedPrivateKey(path string) error {
 		return errors.New("ssh-keygen создал недопустимый файл закрытого ключа")
 	}
 	return nil
-}
-
-func validEd25519Blob(blob []byte) bool {
-	algorithm, rest, ok := readSSHString(blob)
-	if !ok || string(algorithm) != "ssh-ed25519" {
-		return false
-	}
-	key, rest, ok := readSSHString(rest)
-	return ok && len(key) == 32 && len(rest) == 0
-}
-
-func readSSHString(data []byte) ([]byte, []byte, bool) {
-	if len(data) < 4 {
-		return nil, nil, false
-	}
-	size := uint64(binary.BigEndian.Uint32(data[:4]))
-	if size > uint64(len(data)-4) {
-		return nil, nil, false
-	}
-	end := 4 + int(size)
-	return data[4:end], data[end:], true
 }
 
 func requireTerminal(input io.Reader) error {
