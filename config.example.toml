@@ -1,0 +1,64 @@
+# Copy to /etc/bastionctl/config.toml on the server and review every value.
+
+[server]
+profile = "minimal"
+# Leave empty to use SUDO_USER when apply is launched through sudo. When running
+# directly as root, set the existing non-root account with a usable public key.
+admin_user = ""
+
+manage_ssh = true
+manage_firewall = true
+manage_fail2ban = true
+manage_automatic_updates = true
+manage_sysctl = true
+manage_journald = true
+manage_auditd = true
+manage_apparmor = true
+manage_time_sync = true
+manage_permissions = true
+
+# Managed apply refuses password/root SSH access even if these are changed.
+# To preserve a nonstandard SSH policy, disable manage_ssh and manage it manually.
+password_authentication = false
+permit_root_login = false
+allow_tcp_forwarding = false
+allow_streamlocal_forwarding = false
+allow_agent_forwarding = false
+x11_forwarding = false
+max_auth_tries = 3
+login_grace_time = 30
+client_alive_interval = 300
+client_alive_count_max = 2
+
+# Empty means SSH is reachable from any source. For a fixed admin IP/VPN,
+# restrict it, e.g. ["203.0.113.10/32", "2001:db8:1234::/48"].
+ssh_allowed_cidrs = []
+
+# Add only ports that must be publicly reachable. The effective SSH port is
+# discovered automatically and added separately.
+allowed_tcp_ports = []
+allowed_udp_ports = []
+
+fail2ban_maxretry = 5
+fail2ban_findtime = "10m"
+fail2ban_bantime = "1h"
+
+automatic_reboot = false
+automatic_reboot_time = "03:30"
+journal_max_use = "1G"
+
+# 2 is loose reverse-path filtering and is safer with VPNs/multiple routes.
+# Use 1 only after verifying that strict filtering fits the network topology.
+rp_filter = 2
+
+# A successful backup job may `touch` one or more root-owned marker files.
+# This checks freshness only; it does not replace a restoration test.
+backup_markers = []
+backup_max_age_hours = 26
+backup_required = false
+
+[admin]
+connect_timeout = 10
+strict_host_key_checking = true
+remote_executable = "/usr/local/bin/bastionctl"
+remote_config = "/etc/bastionctl/config.toml"

@@ -1,60 +1,39 @@
-name: CI
+name: ci
 
 on:
-    push:
-    pull_request:
-    workflow_dispatch:
+  push:
+  pull_request:
 
 permissions:
-    contents: read
+  contents: read
 
 jobs:
-    bash:
-        name: Bash and smoke tests
-        runs-on: ubuntu-latest
-        timeout-minutes: 15
-        steps:
-            - uses: actions/checkout@v6
-            - name: Install test tools
-              run: |
-                  sudo apt-get update
-                  sudo apt-get install -y shellcheck ripgrep openssh-client iproute2
-            - name: ShellCheck
-              run: shellcheck -S warning secure-linux-wizard.sh secure-linux-wizard-ru.sh secure-linux-wizard-en.sh tests/smoke.sh
-            - name: Smoke tests
-              run: bash tests/smoke.sh
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        go-version: ['1.22.x', 'stable']
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: ${{ matrix.go-version }}
+          cache: false
+      - name: Test
+        run: CGO_ENABLED=0 go test ./...
+      - name: Vet
+        run: CGO_ENABLED=0 go vet ./...
+      - name: Race detector
+        if: matrix.go-version == 'stable'
+        run: go test -race ./...
+      - name: Cross-platform release build
+        if: matrix.go-version == 'stable'
+        env:
+          VERSION: 1.1.0-ci
+        run: sh scripts/build.sh
 
-    powershell:
-        name: Windows PowerShell parser
-        runs-on: windows-latest
-        timeout-minutes: 10
-        steps:
-            - uses: actions/checkout@v6
-            - name: Parse helper with Windows PowerShell 5.1
-              shell: powershell
-              run: |
-                  $tokens = $null
-                  $errors = $null
-                  [System.Management.Automation.Language.Parser]::ParseFile(
-                    (Resolve-Path .\secure-linux-admin.ps1),
-                    [ref]$tokens,
-                    [ref]$errors
-                  ) | Out-Null
-                  if ($errors.Count -gt 0) {
-                    $errors | Format-List -Force
-                    exit 1
-                  }
-            - name: Parse helper with PowerShell 7
-              shell: pwsh
-              run: |
-                  $tokens = $null
-                  $errors = $null
-                  [System.Management.Automation.Language.Parser]::ParseFile(
-                    (Resolve-Path .\secure-linux-admin.ps1),
-                    [ref]$tokens,
-                    [ref]$errors
-                  ) | Out-Null
-                  if ($errors.Count -gt 0) {
-                    $errors | Format-List -Force
-                    exit 1
-                  }

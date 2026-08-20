@@ -1,69 +1,282 @@
-# Secure Linux Wizard
+# bastionctl 1.1
 
-Interactive, reversible Linux-server hardening with Russian and English interfaces.
+`bastionctl` — консольное приложение, которое администратор запускает на своём
+ПК для управления базовой защитой личных Linux-серверов. Один и тот же бинарник
+также работает непосредственно на сервере.
 
-Интерактивное и обратимое усиление безопасности Linux-сервера с русским и английским интерфейсами.
+Основной сценарий не требует знания команд: запуск без аргументов открывает
+русскоязычную интерактивную консоль. Для автоматизации сохранён обычный CLI и
+JSON-вывод.
 
-> [!CAUTION]
-> No script can guarantee absolute security. Create a VPS snapshot, verify the provider recovery console, and keep the current SSH session open until a second key-based login works.
->
-> Ни один скрипт не гарантирует абсолютную безопасность. Сделайте snapshot VPS, проверьте аварийную консоль провайдера и не закрывайте текущую SSH-сессию до успешного второго входа по ключу.
+Проект написан на Go, использует только стандартную библиотеку, не требует
+runtime на целевой машине, не содержит телеметрии и не запускает постоянный
+сетевой агент.
 
-## Documentation / Документация
+## Что умеет приложение
 
-- [Русская инструкция](README_RU.md)
-- [English guide](README_EN.md)
-- [Security policy / Сообщить об уязвимости](SECURITY.md)
-- [Release checklist / Выпуск релиза](RELEASE_CHECKLIST.md)
-- [GitHub publishing guide / Публикация на GitHub](docs/PUBLISH_GITHUB_RU.md)
+На ПК администратора:
 
-## Quick start / Быстрый старт
+- хранит локальный реестр нескольких серверов и отдельную политику каждого;
+- предлагает профили `minimal`, `web`, `docker-host`, `wireguard`, `database`;
+- проверяет OpenSSH Client и права закрытого ключа;
+- выполняет безопасный первый вход по IP и паролю через терминал OpenSSH,
+  создаёт отдельный Ed25519-ключ и при входе от root — непривилегированного
+  администратора;
+- определяет архитектуру сервера и безопасно устанавливает подходящий бинарник,
+  конфигурацию и ограниченное правило `sudoers`;
+- выполняет удалённые `audit`, `plan` и подтверждённый `apply` через штатные
+  `ssh`/`scp` в `BatchMode`;
+- сохраняет историю JSON-отчётов и выделяет новые ошибки;
+- собирает инвентарные снимки без содержимого секретных файлов, подписывает их
+  локальным Ed25519-ключом и показывает drift относительно baseline;
+- объясняет назначение, риск, ручную проверку и откат каждого контроля.
 
-Audit first / Сначала аудит:
+На Debian/Ubuntu-сервере:
+
+- включает вход SSH только по публичному ключу, запрещает root/password login и
+  небезопасный forwarding по умолчанию;
+- до изменения SSH проверяет реальный `authorized_keys`, владельцев/права,
+  непривилегированного администратора и его `sudo`;
+- проверяет `sshd -t` и эффективную политику `sshd -T`, при ошибке откатывает
+  drop-in;
+- настраивает UFW в последнюю очередь: сначала SSH allow, затем нужные сервисные
+  порты, после чего default deny incoming;
+- настраивает Fail2ban на фактических SSH-портах;
+- включает автоматические security updates без автоматической перезагрузки по
+  умолчанию;
+- применяет консервативные sysctl, постоянный journald, auditd, AppArmor,
+  синхронизацию времени и права чувствительных файлов;
+- проверяет UID 0, интерактивные учётные записи, wildcard listeners, Docker
+  published ports и свежесть backup marker-файлов;
+- создаёт резервные копии управляемых файлов перед изменением и использует
+  атомарную запись.
+
+Это безопасная базовая настройка, а не сертификат соответствия и не замена
+модели угроз, защиты приложений, провайдерского firewall или теста
+восстановления резервной копии.
+
+## Быстрый старт
+
+### 1. Распакуйте общий набор
+
+Архив `bastionctl-1.1.0-admin-bundle.tar.gz` содержит бинарники администратора
+для Linux, Windows и macOS, а также обе Linux-сборки для серверов. Оставьте их в
+одном каталоге: тогда приложение автоматически выберет `amd64` или `arm64` при
+установке сервера.
+
+Запустите бинарник своей ОС без аргументов:
+
+```text
+Linux:   ./bastionctl-linux-amd64
+macOS:   ./bastionctl-darwin-arm64
+Windows: .\bastionctl-windows-amd64.exe
+```
+
+На Linux/macOS при необходимости сначала выполните `chmod +x` для бинарников.
+
+### 2. Выберите способ первого доступа
+
+Для нового VPS можно начать только с IP и выданного провайдером root-пароля:
+
+1. в мастере ответьте «да» на вопрос о первом входе по IP и паролю;
+2. укажите IP, SSH-порт и пользователя `root`;
+3. оставьте имя нового администратора `bastion` или задайте своё;
+4. независимо получите fingerprint host key из панели/консоли провайдера;
+5. OpenSSH покажет fingerprint — сравните его **до** ответа `yes` и ввода
+   root-пароля;
+6. если создан новый пользователь, задайте ему отдельный sudo-пароль;
+7. мастер проверит новый ключ и переключит все дальнейшие входы на
+   непривилегированного пользователя.
+
+Если на минимальном Debian/Ubuntu отсутствует `sudo`, root-bootstrap явно
+покажет это и установит пакет из уже настроенных репозиториев через `apt-get`.
+
+Пароль вводится непосредственно в OpenSSH/удалённый `passwd`/`sudo` через TTY.
+`bastionctl` не принимает его параметром, не читает, не сохраняет и не включает
+в отчёты. Перенаправленный ввод для этого режима запрещён. При первом парольном
+входе используется `StrictHostKeyChecking=ask`; после успешной проверки ключа
+локальная политика автоматически становится строгой.
+
+Если ключевой доступ уже настроен, ответьте «нет» и укажите обычную цель
+`user@host`, файл ключа либо SSH agent.
+
+### 3. Подготовьте безопасное применение
+
+До любого `apply` должны существовать:
+
+1. непривилегированный SSH-пользователь с рабочим публичным ключом;
+2. проверенный `sudo`-доступ;
+3. независимо сверенный fingerprint SSH host key;
+4. доступная rescue-консоль провайдера;
+5. актуальная копия и понятная процедура восстановления.
+
+Установка умеет открыть удалённый TTY, чтобы штатный `sudo` запросил пароль
+самостоятельно. После установки приложение создаёт ограниченную
+`NOPASSWD`-политику только для точных команд audit/plan/apply/snapshot.
+Ограниченная политика намеренно не разрешает заменять root-owned бинарник;
+повторное обновление серверной части снова может запросить sudo-пароль.
+Подписанный self-update оставлен отдельным будущим этапом.
+
+### 4. Пройдите мастер
+
+В консоли:
+
+1. выберите «Добавить сервер»;
+2. выберите первый вход по IP/паролю либо готовый ключ, профиль и только
+   необходимые порты;
+3. выберите «Установить/обновить»;
+4. выполните «Аудит» и изучите результаты;
+5. выполните «План»;
+6. только после проверки выберите «Применить» и введите точное подтверждение;
+7. создайте первый snapshot — он станет подписанным baseline.
+
+`apply` никогда не запускается автоматически. Не закрывайте текущую SSH-сессию,
+пока не проверите вход во второй сессии после изменения SSH/firewall.
+
+Если для уже ключевого доступа явно выбран `accept-new`, после первого
+успешного соединения локальная политика автоматически возвращается к строгому
+`StrictHostKeyChecking=yes`. Fingerprint всё равно нужно сверить независимо.
+
+## Профили
+
+| Профиль | Публичные порты по умолчанию | Назначение |
+|---|---:|---|
+| `minimal` | нет | SSH и системная защита |
+| `web` | TCP 80, 443 | HTTP/HTTPS-сервер |
+| `docker-host` | TCP 80, 443 | Docker host с явным предупреждением о published ports |
+| `wireguard` | UDP 51820 | VPN; IP forwarding автоматически не меняется |
+| `database` | нет | База доступна через VPN/приватную сеть |
+
+Профиль — стартовая политика. В консоли можно задать точные TCP/UDP-порты и
+SSH CIDR. Пустой `ssh_allowed_cidrs` означает SSH с любого адреса; для
+стабильного IP или VPN лучше указать узкую сеть.
+
+## Проверка резервных копий
+
+Backup job может обновлять root-owned marker только после успешного завершения:
 
 ```bash
-sudo bash secure-linux-wizard.sh --audit --lang ru
+install -m 0600 -o root -g root /dev/null /var/lib/backup/last-success
+# После успешной копии:
+touch /var/lib/backup/last-success
 ```
 
-Safe preview / Безопасный предварительный просмотр:
+Добавьте путь в `backup_markers`, задайте допустимый возраст и включите
+`backup_required`. Свежий marker подтверждает только работу задания; регулярно
+проводите отдельное тестовое восстановление.
+
+## CLI для автоматизации
+
+Локальный реестр:
 
 ```bash
-sudo bash secure-linux-wizard.sh --role server --lang ru --dry-run
+bastionctl fleet profiles
+bastionctl fleet add fresh root@203.0.113.10 \
+  --password-bootstrap \
+  --admin-user bastion
+bastionctl fleet bootstrap fresh
+bastionctl fleet install fresh
+
+bastionctl fleet add home ops@server.example \
+  --profile web \
+  --identity ~/.ssh/id_ed25519 \
+  --ssh-cidrs 203.0.113.7/32
+bastionctl fleet install home
+bastionctl fleet audit home
+bastionctl fleet plan home
+bastionctl fleet apply home --yes
+bastionctl fleet snapshot home
+bastionctl fleet diff home
+bastionctl fleet history home
+bastionctl fleet audit-all
 ```
 
-Interactive server setup / Интерактивная настройка сервера:
+Для CI/парсинга добавьте `--json`. Полная справка: `bastionctl help`.
+
+Низкоуровневый режим на сервере:
 
 ```bash
-sudo bash secure-linux-wizard.sh --role server --lang ru
+sudo bastionctl server audit --config /etc/bastionctl/config.toml
+sudo bastionctl server plan --config /etc/bastionctl/config.toml
+sudo bastionctl server apply --config /etc/bastionctl/config.toml --yes
+sudo bastionctl server snapshot --config /etc/bastionctl/config.toml --json
 ```
 
-Windows Admin's PC helper / Помощник для Windows:
-
-```powershell
-Set-ExecutionPolicy -Scope Process Bypass
-.\secure-linux-admin.ps1 -Language ru
-```
-
-The wizard never auto-reboots and never disables password/root SSH until a second key login is confirmed. Docker/VPN routing and application-specific policies are intentionally not rewritten blindly.
-
-Мастер не перезагружает сервер автоматически и не отключает парольный/root SSH до подтверждения второго входа по ключу. Сети Docker/VPN и правила конкретных приложений намеренно не переписываются вслепую.
-
-## Supported baseline / Поддерживаемая база
-
-- Ubuntu Server 22.04/24.04 and Debian 12/13: primary path;
-- Fedora/RHEL-like systems with `dnf`, `firewalld`, and `systemd`: conservative baseline;
-- Windows 10/11 PowerShell 5.1+, Linux, macOS, or WSL for Admin's PC.
-
-## Verification / Проверка
+Прямой режим без реестра:
 
 ```bash
-bash tests/smoke.sh
+bastionctl admin doctor --identity ~/.ssh/id_ed25519
+bastionctl admin audit ops@server.example --identity ~/.ssh/id_ed25519
+bastionctl admin plan ops@server.example --identity ~/.ssh/id_ed25519
+bastionctl admin apply ops@server.example --identity ~/.ssh/id_ed25519 --yes
 ```
 
-GitHub Actions also checks Bash syntax, ShellCheck warnings, bilingual dry-runs, rollback path validation, checksum integrity, and PowerShell parsing.
+## Локальные данные
 
-## Source and license / Источник и лицензия
+По умолчанию используется системный пользовательский каталог конфигурации:
 
-The design is adapted from [How To Secure A Linux Server](https://github.com/imthenachoman/How-To-Secure-A-Linux-Server) by Anchal Nigam. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). This project is shared under [CC BY-SA 4.0](LICENSE.txt) with no warranty.
+- Linux: `$XDG_CONFIG_HOME/bastionctl` или `~/.config/bastionctl`;
+- macOS: `~/Library/Application Support/bastionctl`;
+- Windows: `%AppData%\bastionctl`.
 
-Архитектура адаптирована из руководства [How To Secure A Linux Server](https://github.com/imthenachoman/How-To-Secure-A-Linux-Server) Анчала Нигама. Подробности — в [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Проект распространяется по [CC BY-SA 4.0](LICENSE.txt) без гарантий.
+В нём находятся `registry.json`, политики серверов, история, snapshots,
+`integrity.key` и созданные мастером отдельные SSH-ключи. Каталоги/файлы
+создаются с правами `0700`/`0600` там, где ОС их поддерживает; запись через
+symlink отклоняется. Snapshots проверяются по
+локальному доверенному ключу, поэтому случайная подмена обнаруживается. Если
+злоумышленник уже получил доступ к файлам и ключу пользователя администратора,
+эта подпись не является защитой от него — нужен обычный контроль ПК и backup
+каталога состояния.
+
+Другой каталог можно задать через `--state-dir PATH`.
+
+## Модель безопасного применения
+
+- Все enabled-контроли проходят preflight до первого изменения.
+- Параллельные `apply` блокируются через `/run/lock/bastionctl.lock`.
+- Управляемые файлы получают run-specific backup в
+  `/var/backups/bastionctl/<UTC-время>-<pid>/`.
+- Symlink-цели и symlink-компоненты управляемых путей отклоняются.
+- Ошибка SSH вызывает откат и останавливает процесс до firewall.
+- Firewall выполняется последним; существующие UFW-правила не удаляются.
+- Текущий `SSH_CONNECTION` сверяется с фактическим SSH-портом и CIDR.
+- После bootstrap OpenSSH запускается аргументами без локального shell, с
+  `BatchMode=yes`, без password/keyboard-interactive запросов и со строгой
+  проверкой host key. Единственное исключение — явно выбранный первичный вход:
+  `BatchMode=no`, только password/keyboard-interactive, `PubkeyAuthentication=no`
+  и обязательный интерактивный host-key prompt.
+
+Docker может проводить published ports в обход обычного пути UFW. Инструмент
+показывает предупреждение, но не создаёт `DOCKER-USER`/nftables-политику без
+знания сетевой архитектуры.
+
+## Сборка и проверка
+
+Требуется Go 1.22+ и Linux-инструменты `tar`, `sha256sum`:
+
+```bash
+go test ./...
+go vet ./...
+VERSION=1.1.0 ./scripts/build.sh
+(cd dist && sha256sum -c SHA256SUMS)
+```
+
+Сценарий создаёт пять статических бинарников, общий admin-bundle, воспроизводимый
+архив исходников и `SHA256SUMS`. Внешних Go-модулей нет.
+
+## Коды завершения
+
+- `0` — команда выполнена, управляемых `fail` нет;
+- `2` — найдены ошибки политики или drift;
+- `64` — неверные аргументы/конфигурация;
+- `69` — локальная или удалённая операция недоступна;
+- `70` — внутренняя ошибка вывода/консоли;
+- `77` — server `apply` заблокирован правами или preflight.
+
+## Документы
+
+- [Архитектура](docs/ARCHITECTURE.md)
+- [Модель безопасности](SECURITY.md)
+- [Идеи следующего этапа](docs/ROADMAP.md)
+
+Лицензия: MIT.
