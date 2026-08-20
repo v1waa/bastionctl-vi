@@ -58,6 +58,10 @@
 - Local registry/config/history writes are atomic and reject final symlinks.
   Snapshot signatures are checked against the locally trusted Ed25519 key, not
   only against a public key embedded in the snapshot.
+- Mouse input is reduced to a validated menu ID through bounded SGR sequence
+  parsing and fixed hitboxes. The temporary raw/VT terminal state and mouse
+  reporting are disabled before any prompt, OpenSSH process, or command
+  handler runs; redirected input uses the unchanged line-mode path.
 
 ## Trust boundaries
 

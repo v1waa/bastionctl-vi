@@ -990,7 +990,8 @@ func outputError(writer io.Writer, err error) int {
 func Help(version string) string {
 	return fmt.Sprintf(`bastionctl %s — управление защитой личных серверов
 
-Без аргументов запускается интерактивная консоль администратора.
+Без аргументов запускается интерактивная консоль администратора. В обычном
+терминале доступны мышь, стрелки и Enter; ввод номера команды остаётся рабочим.
 
 Основные команды:
   bastionctl console [--state-dir PATH]

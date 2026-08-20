@@ -10,6 +10,8 @@
 - локальное файловое хранилище вместо базы данных;
 - постоянный агент на сервере отсутствует;
 - явные платформенные границы и версионированные JSON-схемы.
+- при росте ответственности предпочтительна переработка связной границы
+  пакета, а не добавление локального workaround в существующий поток.
 
 ## Компоненты
 
@@ -17,7 +19,8 @@
 |---|---|
 | `cmd/bastionctl` | entry point, сигналы, версия сборки |
 | `internal/cli` | команды, параметры, коды завершения, JSON/text |
-| `internal/console` | интерактивное меню администратора и подтверждения |
+| `internal/console` | реестр действий панели, сценарии и подтверждения |
+| `internal/tui` | адаптивный layout, mouse/keyboard events и terminal lifecycle |
 | `internal/controller` | реестр, установка, пользователи, reset, история, snapshots |
 | `internal/state` | атомарное локальное хранилище и подписи Ed25519 |
 | `internal/config` | строгий TOML subset, defaults, validation, rendering |
@@ -36,7 +39,9 @@ Non-Linux-сборки содержат полный режим админист
 
 ```mermaid
 flowchart LR
-    UI[Console / CLI] --> C[Controller]
+    T[TUI: mouse / arrows / number] --> UI[Console command registry]
+    UI --> C[Controller]
+    CLI[CLI] --> C
     C --> S[(Local state)]
     C --> A[Admin transport]
     A -->|OpenSSH| R[Server mode via sudo -n]
@@ -48,6 +53,26 @@ flowchart LR
     A --> C
     C -->|sign, history, diff| S
 ```
+
+## Интерактивный терминал
+
+`internal/console` больше не хранит отдельные копии пунктов в печатной таблице
+и в `switch`. Один реестр команд содержит номер, подпись, смысловую группу,
+совместимые текстовые алиасы и обработчик. Из него одновременно строятся
+кликабельное меню и line-mode fallback.
+
+`internal/tui` не знает о серверах или контролях. Он получает только список
+опций, группирует их в три, два или один столбец по размеру терминала и
+возвращает выбранный ID. На Linux/macOS terminal mode сохраняется и временно
+переключается через системный `stty`; на Windows используются Console API и VT
+input. Mouse reporting и alternate screen активны только внутри `Select`.
+Перед вызовом обработчика состояние восстанавливается через `defer`, поэтому
+OpenSSH, `sudo`, `passwd` и обычные вопросы всегда получают нормальный TTY.
+
+При pipe, тестовом `io.Reader` или неподдерживаемом terminal mode `Select`
+ничего не меняет и сообщает консоли использовать текстовый fallback. Таким
+образом mouse UI является дополнительным способом управления, а не новой
+обязательной зависимостью.
 
 Реестр хранит connection metadata и путь к управляемой политике, но не пароли.
 `Identity` — только путь к закрытому ключу. Для password bootstrap отдельный

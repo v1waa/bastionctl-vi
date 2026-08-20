@@ -21,17 +21,18 @@ import (
 var errInputClosed = errors.New("ввод закрыт")
 
 type UI struct {
-	ctx      context.Context
-	control  *controller.Controller
-	input    io.Reader
-	reader   *bufio.Reader
-	out      io.Writer
-	errOut   io.Writer
-	selected string
+	ctx       context.Context
+	control   *controller.Controller
+	input     io.Reader
+	reader    *bufio.Reader
+	out       io.Writer
+	errOut    io.Writer
+	selected  string
+	menuFocus int
 }
 
 func Run(ctx context.Context, control *controller.Controller, input io.Reader, output, errorOutput io.Writer) int {
-	ui := &UI{ctx: ctx, control: control, input: input, reader: bufio.NewReader(input), out: output, errOut: errorOutput}
+	ui := &UI{ctx: ctx, control: control, input: input, reader: bufio.NewReader(input), out: output, errOut: errorOutput, menuFocus: 1}
 	if err := ui.loop(); err != nil && !errors.Is(err, errInputClosed) && !errors.Is(err, context.Canceled) {
 		_, _ = fmt.Fprintln(errorOutput, "Ошибка консоли:", err)
 		return 70
@@ -58,69 +59,19 @@ func (ui *UI) loop() error {
 		if err := ui.ctx.Err(); err != nil {
 			return err
 		}
-		ui.menu()
-		choice, err := ui.prompt("Команда", "")
+		commands := ui.menuCommands()
+		command, ok, err := ui.chooseCommand(commands)
 		if err != nil {
 			return err
 		}
-		switch strings.ToLower(choice) {
-		case "0", "q", "quit", "exit":
-			return nil
-		case "1", "servers", "select":
-			ui.runSafely(ui.selectServer)
-		case "2", "add":
-			ui.runSafely(ui.addServer)
-		case "3", "install":
-			ui.runWithServer(ui.install)
-		case "4", "audit":
-			ui.runWithServer(func(item state.ManagedServer) error { return ui.action(item, "audit") })
-		case "5", "plan":
-			ui.runWithServer(func(item state.ManagedServer) error { return ui.action(item, "plan") })
-		case "6", "apply":
-			ui.runWithServer(ui.apply)
-		case "7", "snapshot", "drift":
-			ui.runWithServer(ui.snapshot)
-		case "8", "configure", "config":
-			ui.runWithServer(ui.configure)
-		case "9", "history":
-			ui.runWithServer(ui.history)
-		case "10", "all":
-			ui.runSafely(ui.auditAll)
-		case "11", "explain":
-			ui.runSafely(ui.explain)
-		case "12", "remove":
-			ui.runWithServer(ui.remove)
-		case "13", "bootstrap":
-			ui.runWithServer(ui.bootstrap)
-		case "14", "user", "user-add":
-			ui.runWithServer(ui.createUser)
-		case "15", "reset":
-			ui.runWithServer(ui.resetPolicy)
-		case "":
+		if !ok {
 			continue
-		default:
-			_, _ = fmt.Fprintln(ui.errOut, "Неизвестная команда. Выберите номер 0–15.")
 		}
+		if command.id == 0 {
+			return nil
+		}
+		command.run()
 	}
-}
-
-func (ui *UI) menu() {
-	selected := "не выбран"
-	if ui.selected != "" {
-		selected = ui.selected
-	}
-	_, _ = fmt.Fprintf(ui.out, `
-Выбранный сервер: %s
-  1. Список и выбор сервера     7. Снимок и поиск drift
-  2. Добавить сервер            8. Настроить политику
-  3. Установить/обновить        9. История отчётов
-  4. Аудит                     10. Аудит всех серверов
-  5. План                      11. Объяснить контроль
-  6. Применить                 12. Удалить из реестра
- 13. Первичный SSH-вход        14. Создать SSH-пользователя
- 15. Сбросить политику
-  0. Выход
-`, selected)
 }
 
 func (ui *UI) runSafely(operation func() error) {
