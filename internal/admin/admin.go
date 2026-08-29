@@ -20,11 +20,14 @@ import (
 )
 
 type Options struct {
-	Action   string
-	Target   string
-	Port     int
-	Identity string
-	Yes      bool
+	Action         string
+	Target         string
+	Port           int
+	Identity       string
+	KnownHostsFile string
+	Passphrase     string
+	Embedded       bool
+	Yes            bool
 }
 
 var userPattern = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_.-]{0,31}$`)

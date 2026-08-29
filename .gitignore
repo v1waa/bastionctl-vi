@@ -1,5 +1,5 @@
 /dist/
+/ui/windows/node_modules/
 *.test
 *.out
 .DS_Store
-

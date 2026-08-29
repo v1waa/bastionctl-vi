@@ -423,6 +423,14 @@ func (c *Controller) LoadXHTTPConfig(id string) (workload.XHTTPConfig, error) {
 }
 
 func (c *Controller) RunWorkload(ctx context.Context, id, module, action string, request workload.XHTTPConfig, yes bool) (*OperationResult, error) {
+	return c.runWorkload(ctx, id, module, action, request, yes, "", false)
+}
+
+func (c *Controller) RunWorkloadEmbedded(ctx context.Context, id, module, action string, request workload.XHTTPConfig, yes bool, passphrase string) (*OperationResult, error) {
+	return c.runWorkload(ctx, id, module, action, request, yes, passphrase, true)
+}
+
+func (c *Controller) runWorkload(ctx context.Context, id, module, action string, request workload.XHTTPConfig, yes bool, passphrase string, embedded bool) (*OperationResult, error) {
 	if module != workload.XHTTPModule || !workload.IsXHTTPAction(action) {
 		return nil, errors.New("поддерживается workload xhttp plan|apply|verify")
 	}
@@ -449,7 +457,8 @@ func (c *Controller) RunWorkload(ctx context.Context, id, module, action string,
 		return nil, previousErr
 	}
 	r := admin.RunWorkload(ctx, cfg.Admin, c.Version, admin.Options{
-		Target: item.Target, Port: item.Port, Identity: item.Identity,
+		Target: item.Target, Port: item.Port, Identity: item.Identity, KnownHostsFile: c.knownHostsFile(item.ID),
+		Passphrase: passphrase, Embedded: embedded && item.Identity != "",
 	}, module, action, request, yes)
 	if !transportFailed(r) {
 		promoted, promoteErr := c.promoteStrictHostKey(id, &cfg)
@@ -464,6 +473,14 @@ func (c *Controller) RunWorkload(ctx context.Context, id, module, action string,
 }
 
 func (c *Controller) RunAction(ctx context.Context, id, action string, yes bool) (*OperationResult, error) {
+	return c.runAction(ctx, id, action, yes, "", false)
+}
+
+func (c *Controller) RunActionEmbedded(ctx context.Context, id, action string, yes bool, passphrase string) (*OperationResult, error) {
+	return c.runAction(ctx, id, action, yes, passphrase, true)
+}
+
+func (c *Controller) runAction(ctx context.Context, id, action string, yes bool, passphrase string, embedded bool) (*OperationResult, error) {
 	if action != "audit" && action != "plan" && action != "apply" && action != "reset-plan" && action != "reset" {
 		return nil, errors.New("действие должно быть audit, plan, apply, reset-plan или reset")
 	}
@@ -486,7 +503,9 @@ func (c *Controller) RunAction(ctx context.Context, id, action string, yes bool)
 		return nil, previousErr
 	}
 	r := admin.Run(ctx, cfg.Admin, c.Version, admin.Options{
-		Action: action, Target: item.Target, Port: item.Port, Identity: item.Identity, Yes: yes,
+		Action: action, Target: item.Target, Port: item.Port, Identity: item.Identity,
+		KnownHostsFile: c.knownHostsFile(item.ID), Passphrase: passphrase,
+		Embedded: embedded && item.Identity != "", Yes: yes,
 	})
 	if !transportFailed(r) {
 		promoted, promoteErr := c.promoteStrictHostKey(id, &cfg)
@@ -523,6 +542,14 @@ func (c *Controller) recordOperation(id string, item state.ManagedServer, action
 }
 
 func (c *Controller) CreateUser(ctx context.Context, id, username, publicKey string, grantSudo bool) (*OperationResult, error) {
+	return c.createUser(ctx, id, username, publicKey, grantSudo, "", false)
+}
+
+func (c *Controller) CreateUserEmbedded(ctx context.Context, id, username, publicKey string, grantSudo bool, passphrase string) (*OperationResult, error) {
+	return c.createUser(ctx, id, username, publicKey, grantSudo, passphrase, true)
+}
+
+func (c *Controller) createUser(ctx context.Context, id, username, publicKey string, grantSudo bool, passphrase string, embedded bool) (*OperationResult, error) {
 	item, err := c.Store.Server(id)
 	if err != nil {
 		return nil, err
@@ -535,7 +562,7 @@ func (c *Controller) CreateUser(ctx context.Context, id, username, publicKey str
 		return nil, err
 	}
 	r := admin.CreateUser(ctx, cfg.Admin, c.Version, admin.CreateUserOptions{
-		Connection: admin.Options{Target: item.Target, Port: item.Port, Identity: item.Identity},
+		Connection: admin.Options{Target: item.Target, Port: item.Port, Identity: item.Identity, KnownHostsFile: c.knownHostsFile(item.ID), Passphrase: passphrase, Embedded: embedded && item.Identity != ""},
 		Username:   username, PublicKey: publicKey, GrantSudo: grantSudo,
 	})
 	historyPath, err := c.Store.SaveReport(id, r)
@@ -570,17 +597,25 @@ func (c *Controller) SetUserPassword(ctx context.Context, id, username string, i
 	if err != nil {
 		return err
 	}
-	return admin.SetUserPassword(ctx, cfg.Admin, admin.Options{Target: item.Target, Port: item.Port, Identity: item.Identity}, username, input, output)
+	return admin.SetUserPassword(ctx, cfg.Admin, admin.Options{Target: item.Target, Port: item.Port, Identity: item.Identity, KnownHostsFile: c.knownHostsFile(item.ID)}, username, input, output)
 }
 
 func (c *Controller) AuditAll(ctx context.Context) ([]FleetResult, error) {
+	return c.auditAll(ctx, false)
+}
+
+func (c *Controller) AuditAllEmbedded(ctx context.Context) ([]FleetResult, error) {
+	return c.auditAll(ctx, true)
+}
+
+func (c *Controller) auditAll(ctx context.Context, embedded bool) ([]FleetResult, error) {
 	servers, err := c.List()
 	if err != nil {
 		return nil, err
 	}
 	results := make([]FleetResult, 0, len(servers))
 	for _, item := range servers {
-		operation, runErr := c.RunAction(ctx, item.ID, "audit", false)
+		operation, runErr := c.runAction(ctx, item.ID, "audit", false, "", embedded)
 		entry := FleetResult{Server: item, Operation: operation}
 		if runErr != nil {
 			entry.Error = runErr.Error()
@@ -607,7 +642,7 @@ func (c *Controller) BootstrapAccess(ctx context.Context, id string, input io.Re
 	}
 	if err := admin.BootstrapKey(ctx, cfg.Admin, admin.BootstrapOptions{
 		Login: admin.Options{
-			Target: item.BootstrapTarget, Port: item.Port, Identity: item.Identity,
+			Target: item.BootstrapTarget, Port: item.Port, Identity: item.Identity, KnownHostsFile: c.knownHostsFile(item.ID),
 		},
 		ManagedTarget: item.Target,
 		PublicKeyPath: item.Identity + ".pub",
@@ -617,6 +652,21 @@ func (c *Controller) BootstrapAccess(ctx context.Context, id string, input io.Re
 		item.LastAction = "bootstrap"
 		item.LastStatus = "fail"
 		_ = c.Store.UpdateServer(item)
+		return state.ManagedServer{}, err
+	}
+	return c.CompleteBootstrap(id)
+}
+
+func (c *Controller) CompleteBootstrap(id string) (state.ManagedServer, error) {
+	item, err := c.Store.Server(id)
+	if err != nil {
+		return state.ManagedServer{}, err
+	}
+	if !item.BootstrapPending {
+		return state.ManagedServer{}, errors.New("первичный SSH-вход для этого сервера уже завершён")
+	}
+	cfg, err := config.Load(item.ConfigPath)
+	if err != nil {
 		return state.ManagedServer{}, err
 	}
 	if _, err := c.promoteStrictHostKey(id, &cfg); err != nil {
@@ -651,7 +701,7 @@ func (c *Controller) Install(ctx context.Context, id, binaryPath string, input i
 	if err != nil {
 		return nil, err
 	}
-	connection := admin.Options{Target: item.Target, Port: item.Port, Identity: item.Identity}
+	connection := admin.Options{Target: item.Target, Port: item.Port, Identity: item.Identity, KnownHostsFile: c.knownHostsFile(item.ID)}
 	architecture, err := admin.DetectArchitecture(ctx, cfg.Admin, connection)
 	if err != nil {
 		return nil, fmt.Errorf("определить архитектуру сервера: %w", err)
@@ -674,6 +724,17 @@ func (c *Controller) Install(ctx context.Context, id, binaryPath string, input i
 			r.Warnings = append(r.Warnings, "первое соединение успешно: дальнейшая проверка SSH host key переключена в строгий режим")
 		}
 	}
+	return c.RecordInstall(id, selected, r)
+}
+
+func (c *Controller) RecordInstall(id, selected string, r *report.Report) (*OperationResult, error) {
+	if r == nil || r.Action != "install" || r.Mode != "admin" {
+		return nil, errors.New("недопустимый отчёт установки")
+	}
+	item, err := c.Store.Server(id)
+	if err != nil {
+		return nil, err
+	}
 	historyPath, err := c.Store.SaveReport(id, r)
 	if err != nil {
 		return nil, err
@@ -685,6 +746,7 @@ func (c *Controller) Install(ctx context.Context, id, binaryPath string, input i
 	} else {
 		item.LastStatus = "ok"
 		item.LastSeenAt = time.Now().UTC()
+		item.InteractiveSudo = false
 	}
 	if err := c.Store.UpdateServer(item); err != nil {
 		return nil, err
@@ -693,7 +755,23 @@ func (c *Controller) Install(ctx context.Context, id, binaryPath string, input i
 	return &OperationResult{Server: item, Report: r, HistoryPath: historyPath}, nil
 }
 
+func (c *Controller) ResolveServerBinary(id, requested, architecture string) (string, error) {
+	item, err := c.Store.Server(id)
+	if err != nil {
+		return "", err
+	}
+	return c.resolveServerBinary(item, requested, architecture)
+}
+
 func (c *Controller) CaptureSnapshot(ctx context.Context, id string, forceBaseline bool) (*SnapshotResult, error) {
+	return c.captureSnapshot(ctx, id, forceBaseline, "", false)
+}
+
+func (c *Controller) CaptureSnapshotEmbedded(ctx context.Context, id string, forceBaseline bool, passphrase string) (*SnapshotResult, error) {
+	return c.captureSnapshot(ctx, id, forceBaseline, passphrase, true)
+}
+
+func (c *Controller) captureSnapshot(ctx context.Context, id string, forceBaseline bool, passphrase string, embedded bool) (*SnapshotResult, error) {
 	item, err := c.Store.Server(id)
 	if err != nil {
 		return nil, err
@@ -710,7 +788,8 @@ func (c *Controller) CaptureSnapshot(ctx context.Context, id string, forceBaseli
 		return nil, baselineErr
 	}
 	snapshot, err := admin.CaptureSnapshot(ctx, cfg.Admin, c.Version, admin.Options{
-		Target: item.Target, Port: item.Port, Identity: item.Identity,
+		Target: item.Target, Port: item.Port, Identity: item.Identity, KnownHostsFile: c.knownHostsFile(item.ID),
+		Passphrase: passphrase, Embedded: embedded && item.Identity != "",
 	})
 	if err != nil {
 		return nil, err
@@ -763,6 +842,13 @@ func (c *Controller) SetLatestAsBaseline(id string) error {
 		return err
 	}
 	return c.Store.SaveSnapshot(id, latest, true)
+}
+
+func (c *Controller) KnownHostsPath(id string) (string, error) {
+	if _, err := c.Store.Server(id); err != nil {
+		return "", err
+	}
+	return c.Store.ServerKnownHostsPath(id)
 }
 
 func (c *Controller) resolveServerBinary(item state.ManagedServer, requested, architecture string) (string, error) {
@@ -943,4 +1029,16 @@ func (c *Controller) promoteStrictHostKey(id string, cfg *config.Config) (bool, 
 		return false, err
 	}
 	return true, nil
+}
+
+func (c *Controller) knownHostsFile(id string) string {
+	path, err := c.Store.ServerKnownHostsPath(id)
+	if err != nil {
+		return ""
+	}
+	info, err := os.Lstat(path)
+	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Size() < 1 || info.Size() > 64<<10 {
+		return ""
+	}
+	return path
 }

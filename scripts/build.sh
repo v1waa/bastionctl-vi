@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-VERSION="${VERSION:-1.4.0}"
+VERSION="${VERSION:-2.0.0}"
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 DIST="$ROOT/dist"
 
@@ -12,55 +12,53 @@ case "$VERSION" in
     ;;
 esac
 
-command -v go >/dev/null 2>&1 || {
-  echo "Go toolchain не найден в PATH" >&2
-  exit 69
-}
-command -v sha256sum >/dev/null 2>&1 || {
-  echo "sha256sum не найден" >&2
-  exit 69
-}
+for command_name in go npm sha256sum zip; do
+  command -v "$command_name" >/dev/null 2>&1 || {
+    echo "$command_name не найден в PATH" >&2
+    exit 69
+  }
+done
 
 mkdir -p "$DIST"
 cd "$ROOT"
 
 CGO_ENABLED=0 go test ./...
 CGO_ENABLED=0 go vet ./...
+npm --prefix ui/windows ci
+npm --prefix ui/windows run build
 
-build_one() {
-  target_os=$1
-  target_arch=$2
-  output=$3
-  CGO_ENABLED=0 GOOS="$target_os" GOARCH="$target_arch" \
+CGO_ENABLED=0 GOOS=windows GOARCH=amd64 \
+  go build -trimpath -buildvcs=false \
+  -ldflags "-s -w -H=windowsgui -X main.version=$VERSION" \
+  -o "$DIST/bastionctl-admin-windows-amd64.exe" ./cmd/bastionctl-desktop
+
+build_server() {
+  target_arch=$1
+  CGO_ENABLED=0 GOOS=linux GOARCH="$target_arch" \
     go build -trimpath -buildvcs=false \
     -ldflags "-s -w -X main.version=$VERSION" \
-    -o "$DIST/$output" ./cmd/bastionctl
+    -o "$DIST/bastionctl-server-ubuntu-$target_arch" ./cmd/bastionctl
 }
 
-build_one linux amd64 bastionctl-linux-amd64
-build_one linux arm64 bastionctl-linux-arm64
-build_one windows amd64 bastionctl-windows-amd64.exe
-build_one darwin arm64 bastionctl-darwin-arm64
-build_one darwin amd64 bastionctl-darwin-amd64
+build_server amd64
+build_server arm64
 
-bundle="bastionctl-$VERSION-admin-bundle.tar.gz"
-tar \
-  --sort=name \
-  --mtime='UTC 2020-01-01' \
-  --owner=0 --group=0 --numeric-owner \
-  --transform="s,^,bastionctl-$VERSION/," \
-  -czf "$DIST/$bundle" \
-  -C "$DIST" \
-    bastionctl-linux-amd64 \
-    bastionctl-linux-arm64 \
-    bastionctl-windows-amd64.exe \
-    bastionctl-darwin-arm64 \
-    bastionctl-darwin-amd64 \
-  -C "$ROOT" \
-    README.md \
-    SECURITY.md \
-    config.example.toml \
-    LICENSE
+release_stage=$(mktemp -d "$DIST/.release-XXXXXX")
+trap 'rm -rf "$release_stage"' EXIT HUP INT TERM
+bundle_directory="$release_stage/bastionctl-$VERSION"
+mkdir -p "$bundle_directory"
+cp "$DIST/bastionctl-admin-windows-amd64.exe" "$bundle_directory/"
+cp "$DIST/bastionctl-server-ubuntu-amd64" "$bundle_directory/"
+cp "$DIST/bastionctl-server-ubuntu-arm64" "$bundle_directory/"
+cp README.md SECURITY.md config.example.toml LICENSE "$bundle_directory/"
+find "$bundle_directory" -exec touch -t 202001010000 {} +
+
+bundle="bastionctl-$VERSION-windows-ubuntu.zip"
+(
+  cd "$release_stage"
+  zip -X -q -r "$bundle" "bastionctl-$VERSION"
+)
+mv -f "$release_stage/$bundle" "$DIST/$bundle"
 
 archive="bastionctl-$VERSION-source.tar.gz"
 tar \
@@ -69,17 +67,16 @@ tar \
   --owner=0 --group=0 --numeric-owner \
   --exclude='./dist' \
   --exclude='./.git' \
+  --exclude='./ui/windows/node_modules' \
   --transform="s,^\./,bastionctl-$VERSION/," \
   -czf "$DIST/$archive" .
 
 (
   cd "$DIST"
   sha256sum \
-    bastionctl-linux-amd64 \
-    bastionctl-linux-arm64 \
-    bastionctl-windows-amd64.exe \
-    bastionctl-darwin-arm64 \
-    bastionctl-darwin-amd64 \
+    bastionctl-admin-windows-amd64.exe \
+    bastionctl-server-ubuntu-amd64 \
+    bastionctl-server-ubuntu-arm64 \
     "$bundle" \
     "$archive" > SHA256SUMS
   sha256sum -c SHA256SUMS

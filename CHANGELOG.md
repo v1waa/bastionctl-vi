@@ -1,5 +1,36 @@
 # Changelog
 
+## 2.0.0 — 2026-08-29
+
+- Основной интерфейс переработан в нативное Windows-приложение на стабильном
+  Wails 2/WebView2 с минималистичной адаптивной панелью серверов.
+- Добавлены разделы «Обзор», «Защита», «Консоль», «Пользователи», «Сервисы»,
+  «История» и «Настройки»; прежний TUI/CLI сохранён как compatibility и rescue
+  interface.
+- Добавлена встроенная SSH-консоль на xterm.js и
+  `golang.org/x/crypto/ssh`: настоящий Ubuntu PTY, ввод, resize, `sudo`,
+  `passwd`, bounded scrollback и корректное завершение сессий.
+- Host key каждого сервера хранится отдельно и закрепляется только после
+  `TRUST <fingerprint>`. Изменение блокирует соединение; подтверждённая замена
+  сохраняет `known_hosts.previous`.
+- Первый вход по IP/паролю перенесён во встроенный SSH workflow. Пароль не
+  сохраняется; bootstrap снимается только после отдельной проверки созданного
+  Ed25519-ключа постоянного администратора.
+- Интерактивная установка выделена в reusable install plan: встроенное
+  определение архитектуры, bounded upload во временные allowlisted paths,
+  SHA-256, `visudo`, PTY sudo prompt, backup/rollback и version probe.
+- Audit/plan/apply/reset, user-add, snapshots и XHTTP теперь могут работать
+  через встроенный transport без внешнего `ssh.exe`; OpenSSH оставлен для
+  записей, использующих SSH agent, и прежнего CLI.
+- В GUI перенесены профили и основные policy settings, точные подтверждения,
+  создание key-only пользователя, история, snapshots, reset и мастер XHTTP с
+  явным разделением автоматических и ручных шагов.
+- Production frontend использует vanilla JavaScript, Vite и xterm.js, встроен
+  в `.exe` через `go:embed` и не требует Node.js на ПК администратора.
+- Release scope сокращён до Windows amd64 + Ubuntu amd64/arm64. Добавлен
+  отдельный Windows CI build, обновлены README, architecture, security model,
+  roadmap, build scripts и metadata.
+
 ## 1.4.0 — 2026-08-29
 
 - Добавлен отдельный мастер «VLESS + TLS + XHTTP» с управлением мышью,

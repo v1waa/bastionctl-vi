@@ -97,37 +97,47 @@ func NormalizePublicKey(value string) (string, string, error) {
 	return sshkey.NormalizePublicKey(value)
 }
 
+func BootstrapCommand(loginTarget, managedTarget, publicKeyPath string) (string, error) {
+	if err := ValidateTarget(loginTarget); err != nil {
+		return "", fmt.Errorf("цель первичного входа: %w", err)
+	}
+	if err := ValidateTarget(managedTarget); err != nil {
+		return "", fmt.Errorf("цель управления: %w", err)
+	}
+	loginUser, loginHost := splitTarget(loginTarget)
+	managedUser, managedHost := splitTarget(managedTarget)
+	if loginHost != managedHost {
+		return "", errors.New("первичный и постоянный SSH-доступ должны вести на один хост")
+	}
+	if managedUser == "root" {
+		return "", errors.New("постоянное управление от root запрещено; укажите непривилегированного администратора")
+	}
+	if loginUser == "root" {
+		if err := ValidateBootstrapUsername(managedUser); err != nil {
+			return "", err
+		}
+	}
+	if loginUser != "root" && loginUser != managedUser {
+		return "", errors.New("создать другого администратора можно только при первичном входе от root")
+	}
+	publicKey, err := ReadPublicKey(publicKeyPath)
+	if err != nil {
+		return "", err
+	}
+	return bootstrapAuthorizedKeyCommand(loginUser, managedUser, publicKey), nil
+}
+
 func BootstrapKey(ctx context.Context, cfg config.AdminConfig, options BootstrapOptions) error {
 	if err := validateConnection(options.Login); err != nil {
 		return err
 	}
-	if err := ValidateTarget(options.ManagedTarget); err != nil {
-		return fmt.Errorf("цель управления: %w", err)
-	}
 	if err := requireTerminal(options.Input); err != nil {
 		return err
 	}
-	loginUser, loginHost := splitTarget(options.Login.Target)
-	managedUser, managedHost := splitTarget(options.ManagedTarget)
-	if loginHost != managedHost {
-		return errors.New("первичный и постоянный SSH-доступ должны вести на один хост")
-	}
-	if managedUser == "root" {
-		return errors.New("постоянное управление от root запрещено; укажите непривилегированного администратора")
-	}
-	if loginUser == "root" {
-		if err := ValidateBootstrapUsername(managedUser); err != nil {
-			return err
-		}
-	}
-	if loginUser != "root" && loginUser != managedUser {
-		return errors.New("создать другого администратора можно только при первичном входе от root")
-	}
-	publicKey, err := ReadPublicKey(options.PublicKeyPath)
+	command, err := BootstrapCommand(options.Login.Target, options.ManagedTarget, options.PublicKeyPath)
 	if err != nil {
 		return err
 	}
-	command := bootstrapAuthorizedKeyCommand(loginUser, managedUser, publicKey)
 	if err := runPasswordSSH(ctx, cfg, options.Login, command, options.Input, options.Output); err != nil {
 		return err
 	}
@@ -171,8 +181,14 @@ func runPasswordSSH(ctx context.Context, cfg config.AdminConfig, options Options
 		"-o", "ServerAliveCountMax=3",
 		"-o", "StrictHostKeyChecking=" + strict,
 		"-p", strconv.Itoa(options.Port),
-		"--", options.Target, command,
 	}
+	if options.KnownHostsFile != "" {
+		args = append(args,
+			"-o", "UserKnownHostsFile="+options.KnownHostsFile,
+			"-o", "GlobalKnownHostsFile="+os.DevNull,
+		)
+	}
+	args = append(args, "--", options.Target, command)
 	commandCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()
 	cmd := exec.CommandContext(commandCtx, sshPath, args...)

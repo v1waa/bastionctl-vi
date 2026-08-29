@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"bastionctl/internal/config"
+	"bastionctl/internal/terminal"
 )
 
 func validateConnection(options Options) error {
@@ -22,6 +23,9 @@ func validateConnection(options Options) error {
 	if options.Port < 1 || options.Port > 65535 {
 		return errors.New("SSH-порт должен быть в диапазоне 1..65535")
 	}
+	if options.Embedded && options.KnownHostsFile == "" {
+		return errors.New("встроенный SSH-транспорт требует закреплённый host key")
+	}
 	if options.Identity != "" {
 		info, err := os.Lstat(options.Identity)
 		if err != nil {
@@ -29,6 +33,15 @@ func validateConnection(options Options) error {
 		}
 		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
 			return errors.New("путь закрытого ключа должен быть обычным файлом без symlink")
+		}
+	}
+	if options.KnownHostsFile != "" {
+		info, err := os.Lstat(options.KnownHostsFile)
+		if err != nil {
+			return fmt.Errorf("файл SSH host keys недоступен: %w", err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Size() < 1 || info.Size() > 64<<10 {
+			return errors.New("файл SSH host keys должен быть непустым обычным файлом без symlink")
 		}
 	}
 	return nil
@@ -53,6 +66,12 @@ func sshBaseArguments(cfg config.AdminConfig, options Options) []string {
 	if options.Identity != "" {
 		args = append(args, "-i", options.Identity, "-o", "IdentitiesOnly=yes")
 	}
+	if options.KnownHostsFile != "" {
+		args = append(args,
+			"-o", "UserKnownHostsFile="+options.KnownHostsFile,
+			"-o", "GlobalKnownHostsFile="+os.DevNull,
+		)
+	}
 	return args
 }
 
@@ -71,6 +90,26 @@ func runRawSSH(ctx context.Context, cfg config.AdminConfig, options Options, com
 func runRawSSHInput(ctx context.Context, cfg config.AdminConfig, options Options, command string, input io.Reader, timeout time.Duration) ([]byte, []byte, error) {
 	if err := validateConnection(options); err != nil {
 		return nil, nil, err
+	}
+	if options.Embedded {
+		var payload []byte
+		if input != nil {
+			var err error
+			payload, err = io.ReadAll(io.LimitReader(input, (2<<20)+1))
+			if err != nil {
+				return nil, nil, err
+			}
+			if len(payload) > 2<<20 {
+				return nil, nil, errors.New("ввод удалённой команды слишком велик")
+			}
+		}
+		commandCtx, cancel := context.WithTimeout(ctx, timeout)
+		defer cancel()
+		result, err := terminal.RunCommand(commandCtx, terminal.Connection{
+			Target: options.Target, Port: options.Port, Identity: options.Identity,
+			KnownHosts: options.KnownHostsFile, ConnectTimeout: time.Duration(cfg.ConnectTimeout) * time.Second,
+		}, terminal.Credentials{Passphrase: options.Passphrase}, command, payload)
+		return []byte(result.Stdout), []byte(result.Stderr), err
 	}
 	sshPath, err := exec.LookPath("ssh")
 	if err != nil {

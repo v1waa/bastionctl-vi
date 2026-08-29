@@ -2,7 +2,8 @@
 
 ## Assumptions
 
-- The server starts from a vendor-maintained Debian or Ubuntu image.
+- The supported 2.0 server starts from a vendor-maintained Ubuntu 22.04/24.04
+  LTS image. Debian code paths remain compatibility-only until a later release.
 - The operator controls either an existing non-root sudo account with a valid
   public-key login or the initial root/non-root SSH password issued for a new
   host, plus the provider console and a recoverable backup.
@@ -27,11 +28,12 @@
   firewall policy.
 - Administrator mode uses strict host-key checking by default, batch mode,
   validated targets, and fixed remote command arguments.
-- The explicitly selected password bootstrap is the only non-batch exception.
-  It requires a character-device terminal, disables public-key authentication,
-  uses OpenSSH's own password prompt, and sets host-key checking to `ask` so the
-  operator can verify the fingerprint before sending a password. On success it
-  tests the new key and permanently returns that server policy to strict mode.
+- The explicitly selected password bootstrap is the only password-authenticated
+  exception. The Windows application first probes the host key without sending
+  credentials, requires exact `TRUST <fingerprint>`, then authenticates inside
+  the embedded SSH client. The legacy CLI keeps its character-device OpenSSH
+  flow. On success both paths test a separate key login and permanently return
+  that server policy to strict mode.
 - A root bootstrap creates or reuses a non-UID-0 administrator, installs only
   the generated public key, adds the account to Debian/Ubuntu's `sudo` group,
   and lets the remote `passwd` program collect an account password directly.
@@ -40,6 +42,10 @@
 - Remote installation verifies server architecture, local ELF metadata and
   SHA-256 after upload; a sudoers policy is validated with `visudo -cf` before
   root-owned installation.
+- Desktop uploads are restricted to random
+  `/tmp/bastionctl-{bin,config,sudoers}-<24 hex>` paths. Interactive installation
+  runs in a remote PTY, saves prior root-owned files, rolls back on failure and
+  performs a new version probe before reporting success.
 - `user-add` accepts a versioned JSON request through stdin of one fixed sudo
   command. Both sides validate the conservative username and Ed25519 key. The
   server opens `.ssh` and `authorized_keys` with no-follow semantics, checks
@@ -59,6 +65,14 @@
 - Local registry/config/history writes are atomic and reject final symlinks.
   Snapshot signatures are checked against the locally trusted Ed25519 key, not
   only against a public key embedded in the snapshot.
+- Every managed server has a separate app-owned `known_hosts`. The embedded
+  client and OpenSSH fallback use the same file. Changed keys fail closed;
+  replacement requires exact `REPLACE <fingerprint>` and preserves the prior
+  record as `known_hosts.previous`.
+- Production frontend assets are compiled into the signed/hashed executable;
+  the application does not load a remote web UI. User/server values are HTML
+  escaped, SSH bytes are written only to xterm, and credentials are not placed
+  in browser storage.
 - Mouse input is reduced to a validated menu ID through bounded SGR sequence
   parsing and fixed hitboxes. The temporary raw/VT terminal state and mouse
   reporting are disabled before any prompt, OpenSSH process, or command
@@ -94,15 +108,19 @@
 ## Trust boundaries
 
 The local server binary runs as root during `apply`, `reset`, and `user-add` and
-therefore belongs to the trusted computing base. The admin binary delegates
-transport and host-key
-verification to the locally installed OpenSSH Client. JSON returned over that
+therefore belongs to the trusted computing base. The Windows admin application
+uses `golang.org/x/crypto/ssh` for pinned host-key verification, command
+transport, bounded uploads and PTY sessions. A compatibility OpenSSH adapter is
+retained for SSH-agent and legacy CLI cases. JSON returned over either
 authenticated channel is schema-validated before display.
 
 The administrator workstation and its user account are a trust boundary. The
 local state directory contains server addresses, policy, report history, a
 snapshot integrity key, and any dedicated passwordless Ed25519 private keys
-created by the bootstrap wizard. It never contains login or sudo passwords.
+created by the bootstrap wizard. It never contains login passwords, sudo
+passwords or key passphrases. Credentials do exist transiently in process
+memory for the active connection; Go cannot promise forensic erasure of an
+immutable string after use.
 Generated keys and state files use restrictive permissions, but this does not
 protect them from malware running as the same administrator user; protect and
 back up the workstation accordingly.
@@ -134,8 +152,10 @@ Reset does remove the narrow tunnel exception together with the common managed
 SSH drop-in, leaving the still-installed panel unreachable from the network
 until the base policy is applied again.
 
-The application never collects an interactive sudo password. When requested,
-it allocates an SSH TTY and the remote `sudo` program reads the password itself.
+The application does not persist or log an interactive sudo password. It
+allocates an SSH PTY and forwards terminal input to the remote `sudo`/`passwd`
+program with echo disabled by Ubuntu. Terminal input/output is not added to
+application history.
 The generated ongoing policy grants only exact bastionctl
 audit/plan/apply/snapshot/reset-plan/reset/user-add commands. The variable
 user-add request travels through stdin rather than sudo command arguments. The

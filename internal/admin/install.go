@@ -41,13 +41,17 @@ func DetectArchitecture(ctx context.Context, cfg config.AdminConfig, options Opt
 		}
 		return "", errors.New(message)
 	}
-	switch strings.TrimSpace(string(stdout)) {
+	return NormalizeArchitecture(string(stdout))
+}
+
+func NormalizeArchitecture(value string) (string, error) {
+	switch strings.TrimSpace(value) {
 	case "x86_64", "amd64":
 		return "amd64", nil
 	case "aarch64", "arm64":
 		return "arm64", nil
 	default:
-		return "", fmt.Errorf("неподдерживаемая архитектура сервера %q", strings.TrimSpace(string(stdout)))
+		return "", fmt.Errorf("неподдерживаемая архитектура сервера %q", strings.TrimSpace(value))
 	}
 }
 
@@ -223,6 +227,12 @@ func copyToRemote(ctx context.Context, cfg config.AdminConfig, options Options, 
 	}
 	if options.Identity != "" {
 		args = append(args, "-i", options.Identity, "-o", "IdentitiesOnly=yes")
+	}
+	if options.KnownHostsFile != "" {
+		args = append(args,
+			"-o", "UserKnownHostsFile="+options.KnownHostsFile,
+			"-o", "GlobalKnownHostsFile="+os.DevNull,
+		)
 	}
 	args = append(args, "--", local, options.Target+":"+remote)
 	commandCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)

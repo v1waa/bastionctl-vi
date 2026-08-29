@@ -61,6 +61,23 @@ func TestShellQuote(t *testing.T) {
 	}
 }
 
+func TestDedicatedKnownHostsArguments(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "known_hosts")
+	if err := os.WriteFile(path, []byte("example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITest\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	options := Options{Target: "ops@example.com", Port: 22, KnownHostsFile: path}
+	if err := validateConnection(options); err != nil {
+		t.Fatal(err)
+	}
+	arguments := strings.Join(sshBaseArguments(config.Defaults().Admin, options), " ")
+	for _, expected := range []string{"UserKnownHostsFile=" + path, "GlobalKnownHostsFile=" + os.DevNull} {
+		if !strings.Contains(arguments, expected) {
+			t.Fatalf("missing %q in %s", expected, arguments)
+		}
+	}
+}
+
 func TestRunAcceptsFindingExitCodeWithValidReport(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("test helper uses a POSIX script")
@@ -128,6 +145,48 @@ esac
 	}
 	if len(r.Results) != 4 || r.Results[2].Details["version"] != "1.0.0" {
 		t.Fatalf("unexpected install report: %+v", r.Results)
+	}
+}
+
+func TestPrepareInteractiveInstallIsReusableAndBounded(t *testing.T) {
+	directory := t.TempDir()
+	header := make([]byte, 20)
+	copy(header, []byte{0x7f, 'E', 'L', 'F'})
+	header[4] = 2
+	header[5] = 1
+	binary.LittleEndian.PutUint16(header[18:20], 62)
+	binaryPath := filepath.Join(directory, "bastionctl-linux-amd64")
+	if err := os.WriteFile(binaryPath, header, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(directory, "config.toml")
+	data, err := config.Render(config.Defaults())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := PrepareInstall(config.Defaults().Admin, "ops@example.com", binaryPath, configPath, "amd64", true, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	localSudoers := prepared.localSudoers
+	defer prepared.Close()
+	if len(prepared.Uploads) != 3 || len(prepared.RemotePaths) != 3 {
+		t.Fatalf("unexpected upload plan: %+v", prepared)
+	}
+	if !strings.Contains(prepared.Command, "sudo install") || strings.Contains(prepared.Command, "sudo -n install") {
+		t.Fatalf("interactive command does not request sudo normally: %s", prepared.Command)
+	}
+	if cleanup, err := prepared.CleanupCommand(); err != nil || !strings.Contains(cleanup, "bastionctl-bin-") {
+		t.Fatalf("cleanup=%q err=%v", cleanup, err)
+	}
+	if err := prepared.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(localSudoers); !os.IsNotExist(err) {
+		t.Fatalf("temporary sudoers was not removed: %v", err)
 	}
 }
 

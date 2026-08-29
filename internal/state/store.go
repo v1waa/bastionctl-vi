@@ -275,6 +275,14 @@ func (s *Store) ServerIdentityPath(id string) (string, error) {
 	return filepath.Join(directory, "id_ed25519"), nil
 }
 
+func (s *Store) ServerKnownHostsPath(id string) (string, error) {
+	directory, err := s.ServerDirectory(id)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(directory, "known_hosts"), nil
+}
+
 func (s *Store) SaveServerConfig(id string, data []byte) (string, error) {
 	directory, err := s.ServerDirectory(id)
 	if err != nil {
