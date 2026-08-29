@@ -246,6 +246,9 @@ func createSudoersFile(target string, cfg config.AdminConfig) (string, error) {
 		cfg.RemoteExecutable + " server reset-plan --config " + cfg.RemoteConfig + " --json",
 		cfg.RemoteExecutable + " server reset --config " + cfg.RemoteConfig + " --json --yes",
 		cfg.RemoteExecutable + " server user-add --config " + cfg.RemoteConfig + " --json --yes",
+		cfg.RemoteExecutable + " server workload xhttp plan --config " + cfg.RemoteConfig + " --json",
+		cfg.RemoteExecutable + " server workload xhttp apply --config " + cfg.RemoteConfig + " --json --yes",
+		cfg.RemoteExecutable + " server workload xhttp verify --config " + cfg.RemoteConfig + " --json",
 	}
 	content := "# Managed by bastionctl.\nCmnd_Alias BASTIONCTL = " + strings.Join(commands, ", ") + "\n" + username + " ALL=(root) NOPASSWD: BASTIONCTL\n"
 	file, err := os.CreateTemp("", "bastionctl-sudoers-*")

@@ -346,12 +346,16 @@ func userCanAdmin(ctx *serverContext, account *user.User) bool {
 
 func desiredSSHConfig(ctx *serverContext) string {
 	s := ctx.config.Server
-	return fmt.Sprintf("# Managed by bastionctl. Local edits will be replaced.\nPermitRootLogin no\nPasswordAuthentication no\nKbdInteractiveAuthentication no\nAuthenticationMethods publickey\nPubkeyAuthentication yes\nMaxAuthTries %d\nLoginGraceTime %d\nClientAliveInterval %d\nClientAliveCountMax %d\nAllowTcpForwarding %s\nAllowStreamLocalForwarding %s\nAllowAgentForwarding %s\nX11Forwarding %s\nPermitTunnel no\nPermitUserEnvironment no\nLogLevel VERBOSE\n", s.MaxAuthTries, s.LoginGraceTime, s.ClientAliveInterval, s.ClientAliveCountMax, boolWord(s.AllowTCPForwarding), boolWord(s.AllowStreamLocalForwarding), boolWord(s.AllowAgentForwarding), boolWord(s.X11Forwarding))
+	content := fmt.Sprintf("# Managed by bastionctl. Local edits will be replaced.\nPermitRootLogin no\nPasswordAuthentication no\nKbdInteractiveAuthentication no\nAuthenticationMethods publickey\nPubkeyAuthentication yes\nMaxAuthTries %d\nLoginGraceTime %d\nClientAliveInterval %d\nClientAliveCountMax %d\nAllowTcpForwarding %s\nAllowStreamLocalForwarding %s\nAllowAgentForwarding %s\nX11Forwarding %s\nPermitTunnel no\nPermitUserEnvironment no\nLogLevel VERBOSE\n", s.MaxAuthTries, s.LoginGraceTime, s.ClientAliveInterval, s.ClientAliveCountMax, boolWord(s.AllowTCPForwarding), boolWord(s.AllowStreamLocalForwarding), boolWord(s.AllowAgentForwarding), boolWord(s.X11Forwarding))
+	if len(s.SSHLocalForwardDestinations) == 0 {
+		return content
+	}
+	return content + fmt.Sprintf("\n# Narrow local forwarding requested by a managed service.\nMatch User %s\n    AllowTcpForwarding local\n    PermitOpen %s\n    AllowAgentForwarding no\n    X11Forwarding no\nMatch all\n", s.AdminUser, strings.Join(s.SSHLocalForwardDestinations, " "))
 }
 
 func expectedSSHValues(ctx *serverContext) map[string]string {
 	s := ctx.config.Server
-	return map[string]string{
+	values := map[string]string{
 		"permitrootlogin": "no", "passwordauthentication": "no", "kbdinteractiveauthentication": "no",
 		"authenticationmethods": "publickey", "pubkeyauthentication": "yes",
 		"maxauthtries": strconv.Itoa(s.MaxAuthTries), "logingracetime": strconv.Itoa(s.LoginGraceTime),
@@ -360,14 +364,23 @@ func expectedSSHValues(ctx *serverContext) map[string]string {
 		"allowagentforwarding": boolWord(s.AllowAgentForwarding), "x11forwarding": boolWord(s.X11Forwarding),
 		"permittunnel": "no", "permituserenvironment": "no", "loglevel": "VERBOSE",
 	}
+	if len(s.SSHLocalForwardDestinations) > 0 {
+		values["allowtcpforwarding"] = "local"
+		values["permitopen"] = strings.Join(s.SSHLocalForwardDestinations, " ")
+	}
+	return values
 }
 
 func effectiveSSH(ctx *serverContext) (map[string]string, []int, error) {
-	args := []string{"-T"}
 	username := ctx.adminUser
 	if username == "" {
 		username = ctx.config.Server.AdminUser
 	}
+	return effectiveSSHForUser(ctx, username)
+}
+
+func effectiveSSHForUser(ctx *serverContext, username string) (map[string]string, []int, error) {
+	args := []string{"-T"}
 	if username != "" {
 		args = append(args, "-C", "user="+username+",host=localhost,addr=127.0.0.1")
 	}
@@ -410,6 +423,20 @@ func verifyEffectiveSSH(ctx *serverContext) error {
 	sort.Strings(mismatches)
 	if len(mismatches) > 0 {
 		return fmt.Errorf("%s", strings.Join(mismatches, "; "))
+	}
+	if len(ctx.config.Server.SSHLocalForwardDestinations) > 0 {
+		probeUser := "bastionctl-forwarding-probe"
+		if probeUser == ctx.config.Server.AdminUser {
+			probeUser += "-other"
+		}
+		probeValues, _, probeErr := effectiveSSHForUser(ctx, probeUser)
+		if probeErr != nil {
+			return probeErr
+		}
+		globalForwarding := boolWord(ctx.config.Server.AllowTCPForwarding)
+		if probeValues["allowtcpforwarding"] != globalForwarding {
+			return fmt.Errorf("local-forward exception затронул другого пользователя: allowtcpforwarding=%q, ожидается %q", probeValues["allowtcpforwarding"], globalForwarding)
+		}
 	}
 	return nil
 }

@@ -21,24 +21,87 @@
 | `internal/cli` | команды, параметры, коды завершения, JSON/text |
 | `internal/console` | реестр действий панели, сценарии и подтверждения |
 | `internal/tui` | адаптивный layout, mouse/keyboard events и terminal lifecycle |
-| `internal/controller` | реестр, установка, пользователи, reset, история, snapshots |
+| `internal/controller` | orchestration реестра, политик, workload, истории и snapshots |
 | `internal/state` | атомарное локальное хранилище и подписи Ed25519 |
 | `internal/config` | строгий TOML subset, defaults, validation, rendering |
 | `internal/profile` | встроенные стартовые политики сервисов |
 | `internal/admin` | диагностика, проверка target, безопасные `ssh`/`scp` |
 | `internal/server` | Linux-контроли, preflight, apply, backup/rollback |
+| `internal/workload` | сервисные desired state, plan/apply/verify и ручные инструкции |
 | `internal/sshkey` | единая проверка usernames, Ed25519-ключей и fingerprints |
 | `internal/inventory` | snapshot и детерминированный drift diff |
 | `internal/explain` | назначение, риск, проверка и откат контролей |
 | `internal/report` | `bastionctl.report.v1` и renderers |
 
 Non-Linux-сборки содержат полный режим администратора. Server `apply` на них
-явно отклоняется. Linux-сборка содержит оба режима.
+явно отклоняется. Linux-сборка содержит оба режима. Платформенная реализация
+workload также отделена build tags и на non-Linux явно возвращает отказ.
+
+## Workload VLESS + TLS + XHTTP
+
+Сервисная настройка не встроена в базовые SSH/UFW-контроли. Она реализована как
+отдельный модуль `internal/workload` с собственной версионированной схемой
+`bastionctl.workload.xhttp.v1`, ownership-marker, backup-контуром и действиями
+`plan`, `apply`, `verify`. Это позволяет развивать или удалить модуль без
+ветвления общего hardening engine.
+
+```mermaid
+flowchart TD
+    A[Saved non-secret desired state] --> B[Base policy plan: TCP 80/443]
+    B --> C[XHTTP read-only preflight]
+    C -->|blocked| D[Report; service unchanged]
+    C -->|passed| E[Verified release + staged extraction]
+    E --> F[Backup + loopback panel + Certbot]
+    F --> G[Manual inbound and client setup]
+    G --> H[Read-only verify]
+```
+
+На ПК сохраняются только domain, ACME email, ожидаемый публичный IP, локальный
+порт/путь панели и закреплённая версия. Этот JSON передаётся через stdin точной
+sudo-команды, а не расширяет командную строку. Учётные данные генерируются на
+сервере, пишутся в `/etc/bastionctl/workloads/xhttp-access.txt` с правами 0600
+в каталоге 0700, не попадают в отчёт и должны быть удалены после первого входа.
+
+Linux runner допускает только amd64/arm64 asset одного release и проверяет
+полный SHA-256 до распаковки. Redirect ограничен HTTPS allowlist, а tar reader
+отклоняет absolute/traversal paths, symlink, hardlink, device и превышение
+лимитов. Существующая установка без marker не принимается автоматически.
+Управляемая установка обновляется только при полном совпадении desired state;
+неявная миграция домена или панели запрещена.
+Официальный systemd unit сохраняется отдельно от bastionctl drop-in. Drop-in
+задаёт `UMask=0077`, `NoNewPrivileges`, private tmp, protected home/kernel/
+control groups и запрет SUID/SGID; эффективные свойства читаются через
+`systemctl show`. База, log directory и workload credentials принадлежат root и
+закрыты от остальных пользователей. Управляемый `/etc/default/x-ui` фиксирует
+SQLite backend и не позволяет случайно унаследовать посторонний DSN/environment.
+
+Публичны только TCP 80/443. Панель принудительно привязана к `127.0.0.1` и
+открывается через SSH port forwarding. Создание VLESS/XHTTP inbound, UUID,
+клиентского профиля, 2FA и проверка конкретной сети остаются явными ручными
+шагами: они зависят от версии UI и пользовательского клиента и не требуют от
+bastionctl хранить application secrets.
+
+Workload запрашивает сетевую возможность через общую desired policy, а не
+пишет второй SSH drop-in. Контроллер добавляет TCP 80/443 и одно назначение
+`127.0.0.1:PANEL_PORT` в `ssh_local_forward_destinations`. Основной SSH-контроль
+генерирует в своём атомарно проверяемом drop-in блок `Match User ADMIN` с
+`AllowTcpForwarding local`, точным `PermitOpen` и завершающим `Match all`.
+`sshd -T -C` отдельно проверяет администратора и постороннего пользователя,
+поэтому исключение не превращается в глобальный forwarding.
+Общий policy reconciler повторно добавляет эти требования при смене профиля или
+ручном редактировании базовой политики, пока workload desired state существует;
+редактирование порта панели одновременно заменяет старый `PermitOpen`.
+
+Обычный reset базовой политики не пересекает ownership workload. Пакеты,
+Certbot state, сертификаты и 3x-ui не удаляются этой командой. Узкое правило
+туннеля находится в общем SSH drop-in и исчезает вместе с ним; сервис остаётся
+loopback-only до повторного apply политики. Отдельный uninstall должен иметь
+собственный plan, dependency checks и confirmation.
 
 ## Поток управления
 
 ```mermaid
-flowchart LR
+flowchart TD
     T[TUI: mouse / arrows / number] --> UI[Console command registry]
     UI --> C[Controller]
     CLI[CLI] --> C
@@ -49,6 +112,7 @@ flowchart LR
     R --> I[Inventory snapshot]
     R --> U[Key-only user creation]
     R --> X[Owned-policy reset]
+    R --> W[Owned service workload]
     I --> A
     A --> C
     C -->|sign, history, diff| S
@@ -62,8 +126,9 @@ flowchart LR
 кликабельное меню и line-mode fallback.
 
 `internal/tui` не знает о серверах или контролях. Он получает только список
-опций, группирует их в три, два или один столбец по размеру терминала и
-возвращает выбранный ID. На Linux/macOS terminal mode сохраняется и временно
+опций, раскладывает смысловые группы максимум в четыре столбца и уменьшает их
+число по размеру терминала, после чего возвращает выбранный ID. На Linux/macOS
+terminal mode сохраняется и временно
 переключается через системный `stty`; на Windows используются Console API и VT
 input. Mouse reporting и alternate screen активны только внутри `Select`.
 Перед вызовом обработчика состояние восстанавливается через `defer`, поэтому
@@ -171,14 +236,15 @@ sudoers через `visudo -cf`, затем устанавливает root-owne
 может установить ключ существующему пользователю либо при входе от root создать
 непривилегированного администратора. Пароли обрабатывают только OpenSSH,
 удалённый `passwd` и `sudo`; приложение не получает их байты. В sudoers также
-перечислены точные `reset-plan`, `reset` и `user-add`; переменный запрос
-`user-add` поступает только через stdin.
+перечислены точные `reset-plan`, `reset`, `user-add` и три действия
+`workload xhttp`; переменные запросы `user-add`/`xhttp` поступают только через
+stdin.
 
 ## Локальное состояние
 
-Файлы реестра, политик, истории и snapshots пишутся через temporary + sync +
-rename; final symlink отклоняется. `config_path` реестра обязан указывать на
-ожидаемый файл внутри выбранного state root.
+Файлы реестра, политик, workload desired state, истории и snapshots пишутся
+через temporary + sync + rename; final symlink отклоняется. `config_path`
+реестра обязан указывать на ожидаемый файл внутри выбранного state root.
 
 Snapshot подписывается локальным Ed25519-ключом. При чтении проверяются и
 signature, и совпадение embedded public key с локально доверенным ключом. Это

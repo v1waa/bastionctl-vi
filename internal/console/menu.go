@@ -30,6 +30,8 @@ func (ui *UI) menuCommands() []menuCommand {
 		{id: 7, label: "Снимок и поиск drift", group: "ЗАЩИТА", aliases: []string{"snapshot", "drift"}, run: func() { ui.runWithServer(ui.snapshot) }},
 		{id: 15, label: "Сбросить политику", group: "ЗАЩИТА", aliases: []string{"reset"}, run: func() { ui.runWithServer(ui.resetPolicy) }},
 
+		{id: 16, label: "VLESS + TLS + XHTTP", group: "СЕРВИСЫ", aliases: []string{"xhttp", "vless", "3x-ui"}, run: func() { ui.runWithServer(ui.xhttpWizard) }},
+
 		{id: 8, label: "Настроить политику", group: "УПРАВЛЕНИЕ", aliases: []string{"configure", "config"}, run: func() { ui.runWithServer(ui.configure) }},
 		{id: 9, label: "История отчётов", group: "УПРАВЛЕНИЕ", aliases: []string{"history"}, run: func() { ui.runWithServer(ui.history) }},
 		{id: 10, label: "Аудит всех серверов", group: "УПРАВЛЕНИЕ", aliases: []string{"all"}, run: func() { ui.runSafely(ui.auditAll) }},
@@ -78,7 +80,7 @@ func (ui *UI) chooseCommand(commands []menuCommand) (menuCommand, bool, error) {
 	}
 	command, ok := findMenuCommand(commands, choice)
 	if !ok && strings.TrimSpace(choice) != "" {
-		_, _ = fmt.Fprintf(ui.errOut, "Неизвестная команда %q; выберите номер 0–15.\n", strings.TrimSpace(choice))
+		_, _ = fmt.Fprintf(ui.errOut, "Неизвестная команда %q; выберите номер из меню.\n", strings.TrimSpace(choice))
 	}
 	return command, ok, nil
 }

@@ -97,6 +97,29 @@ func TestValidateID(t *testing.T) {
 	}
 }
 
+func TestWorkloadConfigUsesConfinedServerPath(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, err := store.SaveWorkloadConfig("alpha", "xhttp", []byte("{}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(path, filepath.Join("servers", "alpha", "workloads", "xhttp.json")) {
+		t.Fatalf("unexpected path: %s", path)
+	}
+	data, err := store.LoadWorkloadConfig("alpha", "xhttp")
+	if err != nil || string(data) != "{}\n" {
+		t.Fatalf("data=%q err=%v", data, err)
+	}
+	for _, unsafe := range []string{"../x", "XHTTP", "a/b"} {
+		if _, err := store.SaveWorkloadConfig("alpha", unsafe, []byte("x")); err == nil {
+			t.Fatalf("unsafe workload name accepted: %q", unsafe)
+		}
+	}
+}
+
 func TestRegistryV1MigratesToV2OnWrite(t *testing.T) {
 	store, err := Open(t.TempDir())
 	if err != nil {

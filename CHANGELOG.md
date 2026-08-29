@@ -1,5 +1,40 @@
 # Changelog
 
+## 1.4.0 — 2026-08-29
+
+- Добавлен отдельный мастер «VLESS + TLS + XHTTP» с управлением мышью,
+  стрелками и цифровым fallback внутри существующего TUI.
+- Мастер сохраняет версионированный non-secret desired state, добавляет TCP
+  80/443 через обычную базовую policy и требует раздельные plan/confirmation
+  для firewall и workload.
+- Добавлены `fleet xhttp-config/plan/apply/verify/guide` и ограниченные
+  server-side `workload xhttp plan/apply/verify`; JSON передаётся через stdin
+  точных sudo-команд.
+- Автоматическая часть устанавливает закреплённый 3x-ui `v3.7.0` для Linux
+  amd64/arm64, проверяет SHA-256, HTTPS redirects, лимиты и безопасную структуру
+  tar до установки root-owned файлов.
+- Панель принудительно привязана к loopback; случайные начальные данные лежат в
+  root-only файле и не попадают в отчёты. Сертификат выдаёт системный Certbot,
+  после чего проверяются hostname, срок, путь и права private key.
+- Глобальный SSH forwarding остаётся запрещён: основной SSH-контроль создаёт
+  только `Match User`/`AllowTcpForwarding local` с точным loopback `PermitOpen`
+  панели и проверяет эффективную политику для совпадающего/другого пользователя.
+- База и журналы x-ui закрываются правами root-only; отдельный systemd drop-in
+  включает restrictive umask, `NoNewPrivileges`, private tmp, защиту home/
+  kernel/control groups и `RestrictSUIDSGID`, а verify сверяет свойства unit.
+- Добавлены preflight DNS/OS/resources/listeners/UFW, ownership-marker,
+  отдельный backup/rollback и verify версии, systemd, listener, TLS и firewall.
+- Повторные `plan`/`apply` сверяют полный desired state: исправная установка
+  возвращает no-op, а повреждённая показывает точный список контролов ремонта.
+- Verify предупреждает, пока root-only файл начальных данных панели не удалён;
+  эффективный `PermitOpen` должен точно совпадать с локальной policy без лишних
+  назначений.
+- Встроена персонализированная инструкция ручных шагов: домен/provider
+  firewall, SSH-туннель, 2FA, VLESS/TLS/XHTTP inbound, UUID, ECH, QR/ссылка и
+  итоговая проверка. Публичный panel port и `curl | bash` не используются.
+- README, архитектура, security model, roadmap, пример конфигурации, CLI help,
+  CI и release metadata обновлены для 1.4.0.
+
 ## 1.3.0 — 2026-08-20
 
 - Главное меню переработано в отдельный TUI-слой: доступны клики мышью,

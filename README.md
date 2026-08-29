@@ -1,4 +1,4 @@
-# bastionctl 1.3
+# bastionctl 1.4
 
 `bastionctl` — консольное приложение, которое администратор запускает на своём
 ПК для управления базовой защитой личных Linux-серверов. Один и тот же бинарник
@@ -30,6 +30,9 @@ runtime на целевой машине, не содержит телеметр
   конфигурацию и ограниченное правило `sudoers`;
 - выполняет удалённые `audit`, `plan` и подтверждённый `apply` через штатные
   `ssh`/`scp` в `BatchMode`;
+- содержит отдельный мастер VLESS + TLS + XHTTP: сохраняет желаемые параметры,
+  проверяет DNS/порты/firewall, устанавливает закреплённый 3x-ui и выдаёт
+  пошаговую инструкцию для ручного создания inbound и клиента;
 - создаёт отдельного key-only SSH-пользователя по публичному Ed25519-ключу с
   другого ПК, не получая закрытый ключ;
 - строит read-only план и выполняет подтверждённый сброс всей политики,
@@ -61,7 +64,10 @@ runtime на целевой машине, не содержит телеметр
 - при сбросе удаляет только файлы с ownership-маркером bastionctl и правила UFW
   с комментариями `bastionctl-ssh`/`bastionctl-service`; аккаунты, home,
   `authorized_keys`, сторонние правила, пакеты и данные сервисов сохраняются;
-  необходимый для повторного входа SSH allow также не удаляется.
+  необходимый для повторного входа SSH allow также не удаляется;
+- для XHTTP-workload проверяет официальный архив 3x-ui по закреплённому SHA-256,
+  держит панель только на `127.0.0.1`, получает сертификат системным Certbot и
+  сохраняет одноразовые учётные данные в root-only файле.
 
 Это безопасная базовая настройка, а не сертификат соответствия и не замена
 модели угроз, защиты приложений, провайдерского firewall или теста
@@ -71,7 +77,7 @@ runtime на целевой машине, не содержит телеметр
 
 ### 1. Распакуйте общий набор
 
-Архив `bastionctl-1.3.0-admin-bundle.tar.gz` содержит бинарники администратора
+Архив `bastionctl-1.4.0-admin-bundle.tar.gz` содержит бинарники администратора
 для Linux, Windows и macOS, а также обе Linux-сборки для серверов. Оставьте их в
 одном каталоге: тогда приложение автоматически выберет `amd64` или `arm64` при
 установке сервера.
@@ -132,16 +138,18 @@ Windows: .\bastionctl-windows-amd64.exe
 Установка умеет открыть удалённый TTY, чтобы штатный `sudo` запросил пароль
 самостоятельно. После установки приложение создаёт ограниченную
 `NOPASSWD`-политику только для точных команд
-audit/plan/apply/snapshot/reset-plan/reset/user-add.
+audit/plan/apply/snapshot/reset-plan/reset/user-add и трёх точных команд
+`workload xhttp` (`plan`, `apply`, `verify`). Конфигурация workload передаётся
+только через stdin и повторно валидируется на сервере.
 Ограниченная политика намеренно не разрешает заменять root-owned бинарник;
 повторное обновление серверной части снова может запросить sudo-пароль.
 Подписанный self-update оставлен отдельным будущим этапом.
 
 ### 4. Пройдите мастер
 
-В консоли пункты распределены по трём смысловым столбцам — «Серверы»,
-«Защита» и «Управление». На узком окне разметка автоматически становится
-двух- или одноколоночной:
+В консоли пункты распределены по смысловым группам «Серверы», «Защита»,
+«Сервисы» и «Управление». На узком окне разметка автоматически уменьшает число
+столбцов:
 
 1. выберите «Добавить сервер»;
 2. выберите первый вход по IP/паролю либо готовый ключ, профиль и только
@@ -162,6 +170,69 @@ audit/plan/apply/snapshot/reset-plan/reset/user-add.
 Если для уже ключевого доступа явно выбран `accept-new`, после первого
 успешного соединения локальная политика автоматически возвращается к строгому
 `StrictHostKeyChecking=yes`. Fingerprint всё равно нужно сверить независимо.
+
+## Мастер VLESS + TLS + XHTTP
+
+В главном меню выберите «VLESS + TLS + XHTTP» мышью, стрелками или номером 16.
+Мастер основан на [руководстве Durov](https://durov.gitbook.io/durov-docs/documentation),
+но небезопасные и устаревшие детали намеренно не копирует: версия `2.8.10` из
+руководства заменена на закреплённый официальный 3x-ui `v3.7.0`, удалённый
+`curl | bash` не выполняется, а порт панели не публикуется в интернете.
+
+| Выполняет bastionctl | Выполняет пользователь |
+|---|---|
+| Сохраняет domain/email/IP без паролей | Покупает или выбирает домен |
+| Добавляет TCP 80/443 в желаемую UFW-политику только через обычные plan/apply | Создаёт точную A-запись домена на публичный IP и ждёт DNS |
+| Проверяет Ubuntu/Debian, systemd, RAM, диск, DNS, listeners и UFW | Открывает TCP 80/443 в firewall панели VPS/провайдера |
+| Скачивает только asset 3x-ui `v3.7.0` для amd64/arm64, проверяет SHA-256 до распаковки | Сверяет результаты plan и вводит точные подтверждения |
+| Отклоняет traversal, symlink и специальные файлы в архиве; делает backup и rollback управляемых путей | Через SSH-туннель входит в панель, сохраняет пароль, включает 2FA и удаляет временный файл учётных данных |
+| Привязывает HTTP-панель к `127.0.0.1` и не открывает её порт в UFW | В панели создаёт VLESS + TLS + XHTTP inbound на 443, новый UUID и экспортирует ссылку/QR в свой Xray-клиент |
+| Добавляет в SSH-политику `Match User` с `AllowTcpForwarding local` и точным `PermitOpen 127.0.0.1:PANEL_PORT`; для остальных пользователей forwarding остаётся запрещён | Запускает напечатанную команду SSH-туннеля под выбранным администратором |
+| Закрывает базу/логи x-ui правами root-only и добавляет проверяемый systemd hardening drop-in | Хранит экспорт клиентской конфигурации и recovery-коды 2FA вне сервера |
+| Устанавливает Certbot из репозитория ОС, получает/проверяет сертификат и ставит renewal hook | При наличии пункта обновляет ECH certificate и тестирует `auto`, затем при необходимости другие XHTTP-режимы |
+| Проверяет marker, версию, systemd, loopback listener, TLS, UFW и listener 443 | Возвращается в мастер и запускает «Проверить» |
+
+До продолжения мастера вручную сделайте следующее:
+
+1. Создайте A-запись `vpn.example.com → публичный-IP-сервера`. Если рабочий
+   IPv6 не настроен, не создавайте AAAA: мастер остановится и покажет все лишние
+   A/AAAA-адреса.
+2. Разрешите входящий TCP 80 и 443 не только в UFW, но и в панели VPS. TCP 80
+   нужен для HTTP-01 выпуска и продления сертификата; порт панели наружу не
+   открывайте.
+3. Сохраните rescue-доступ и выполните обычные `audit`/`plan` базовой защиты.
+
+После автоматической части мастер напечатает команды с вашими значениями. Общий
+порядок такой:
+
+```bash
+# На сервере: увидеть одноразовые данные панели
+sudo cat /etc/bastionctl/workloads/xhttp-access.txt
+
+# На ПК администратора: оставить окно открытым
+ssh -N -L 127.0.0.1:18080:127.0.0.1:PANEL_PORT -p SSH_PORT user@server
+```
+
+Откройте показанный мастером адрес вида
+`http://127.0.0.1:18080/panel-.../`, включите 2FA и удалите временный файл
+`xhttp-access.txt`. Затем в 3x-ui создайте inbound: `VLESS`, port `443`,
+transport `XHTTP`, security `TLS`, decryption `none`; укажите домен/SNI,
+`/etc/letsencrypt/live/DOMAIN/fullchain.pem` и `privkey.pem`, создайте новый
+UUID, импортируйте ссылку/QR в клиент и выполните «Проверить» в bastionctl.
+
+Мастер использует документацию и артефакты первичных проектов:
+[3x-ui v3.7.0](https://github.com/MHSanaei/3x-ui/releases/tag/v3.7.0),
+[установка 3x-ui](https://github.com/MHSanaei/3x-ui/wiki/Installation) и
+[XHTTP transport в Xray](https://xtls.github.io/en/config/transport.html).
+
+Workload имеет собственный ownership-marker и backup-контур. Обычный «Сбросить
+политику» не удаляет 3x-ui, сертификаты или его данные: это сервис пользователя,
+а не базовый hardening. Вместе с общим SSH drop-in сброс удалит и узкое правило
+туннеля, поэтому для повторного входа в оставшуюся loopback-панель сначала снова
+примените базовую политику. До появления отдельного проверяемого uninstall
+удаляйте workload только после ручного backup и изучения зависимостей.
+Повторный `plan` или `apply` сначала выполняет полный verify: исправное состояние
+не переустанавливается, а найденный drift превращается в явный план ремонта.
 
 ## Вход нового пользователя с другого ПК
 
@@ -273,6 +344,20 @@ bastionctl fleet diff home
 bastionctl fleet history home
 bastionctl fleet audit-all
 
+# Отдельный мастер сервиса: сначала сохранить параметры и обновить server-side
+# компонент, затем обязательные plan и подтверждённый apply.
+bastionctl fleet xhttp-config home \
+  --domain vpn.example.com \
+  --email admin@example.com \
+  --server-ip 203.0.113.10
+bastionctl fleet install home
+bastionctl fleet plan home
+bastionctl fleet apply home --yes
+bastionctl fleet xhttp-plan home
+bastionctl fleet xhttp-apply home --yes
+bastionctl fleet xhttp-guide home
+bastionctl fleet xhttp-verify home
+
 # Сначала read-only план, затем отдельное подтверждённое действие:
 bastionctl fleet reset-plan home
 bastionctl fleet reset home --yes
@@ -289,6 +374,9 @@ sudo bastionctl server apply --config /etc/bastionctl/config.toml --yes
 sudo bastionctl server snapshot --config /etc/bastionctl/config.toml --json
 sudo bastionctl server reset-plan --config /etc/bastionctl/config.toml
 sudo bastionctl server reset --config /etc/bastionctl/config.toml --yes
+sudo bastionctl server workload xhttp plan --config /etc/bastionctl/config.toml --json < xhttp.json
+sudo bastionctl server workload xhttp apply --config /etc/bastionctl/config.toml --json --yes < xhttp.json
+sudo bastionctl server workload xhttp verify --config /etc/bastionctl/config.toml --json < xhttp.json
 ```
 
 Прямой режим без реестра:
@@ -337,6 +425,11 @@ symlink отклоняется. Snapshots проверяются по
   маркером владения плюс явно помеченные UFW-правила.
 - Создание пользователя передаёт JSON-запрос через stdin фиксированной
   sudo-команде; username и ключ повторно валидируются на сервере.
+- XHTTP является отдельным workload: его non-secret desired state передаётся
+  через stdin фиксированной sudo-команде; архив имеет allowlist host/архитектур,
+  лимиты размера и закреплённый SHA-256, а панель обязана слушать loopback.
+  SSH-туннель не включает forwarding глобально: generated `Match User`
+  ограничен направлением `local` и точным `PermitOpen` панели.
 - Текущий `SSH_CONNECTION` сверяется с фактическим SSH-портом и CIDR.
 - После bootstrap OpenSSH запускается аргументами без локального shell, с
   `BatchMode=yes`, без password/keyboard-interactive запросов и со строгой
@@ -355,7 +448,7 @@ Docker может проводить published ports в обход обычно�
 ```bash
 go test ./...
 go vet ./...
-VERSION=1.3.0 ./scripts/build.sh
+VERSION=1.4.0 ./scripts/build.sh
 (cd dist && sha256sum -c SHA256SUMS)
 ```
 

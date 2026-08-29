@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"bastionctl/internal/report"
+	"bastionctl/internal/workload"
 )
 
 func TestAddServerCreatesRoundTripConfig(t *testing.T) {
@@ -161,6 +162,63 @@ func TestFindNewFailures(t *testing.T) {
 	want := []string{"backup", "firewall"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %v, want %v", got, want)
+	}
+}
+
+func TestXHTTPConfigAndPolicyAreSeparateFromRegistry(t *testing.T) {
+	control, err := New("test", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := control.AddServer(AddOptions{ID: "vpn", Target: "ops@203.0.113.10", Profile: "minimal"}); err != nil {
+		t.Fatal(err)
+	}
+	setup, err := workload.NewXHTTPConfig("vpn.example.com", "admin@example.com", "203.0.113.10", 24443)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, changed, err := control.ConfigureXHTTP("vpn", setup)
+	if err != nil || !changed {
+		t.Fatalf("changed=%v err=%v", changed, err)
+	}
+	loaded, err := control.LoadXHTTPConfig("vpn")
+	if err != nil || loaded != setup {
+		t.Fatalf("loaded=%+v err=%v", loaded, err)
+	}
+	cfg, err := control.Config("vpn")
+	if err != nil || !reflect.DeepEqual(cfg.Server.AllowedTCPPorts, []int{80, 443}) {
+		t.Fatalf("ports=%v err=%v", cfg.Server.AllowedTCPPorts, err)
+	}
+	if !reflect.DeepEqual(cfg.Server.SSHLocalForwardDestinations, []string{"127.0.0.1:24443"}) {
+		t.Fatalf("forward destinations=%v", cfg.Server.SSHLocalForwardDestinations)
+	}
+	_, changed, err = control.ConfigureXHTTP("vpn", setup)
+	if err != nil || changed {
+		t.Fatalf("second changed=%v err=%v", changed, err)
+	}
+	updated := setup
+	updated.PanelPort = 25554
+	_, changed, err = control.ConfigureXHTTP("vpn", updated)
+	if err != nil || !changed {
+		t.Fatalf("updated changed=%v err=%v", changed, err)
+	}
+	cfg, err = control.Config("vpn")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(cfg.Server.SSHLocalForwardDestinations, []string{"127.0.0.1:25554"}) {
+		t.Fatalf("stale forward was not replaced: %v", cfg.Server.SSHLocalForwardDestinations)
+	}
+	if err := control.ApplyProfile("vpn", "minimal"); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = control.Config("vpn")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(cfg.Server.AllowedTCPPorts, []int{80, 443}) ||
+		!reflect.DeepEqual(cfg.Server.SSHLocalForwardDestinations, []string{"127.0.0.1:25554"}) {
+		t.Fatalf("profile change dropped workload requirements: ports=%v forwards=%v", cfg.Server.AllowedTCPPorts, cfg.Server.SSHLocalForwardDestinations)
 	}
 }
 

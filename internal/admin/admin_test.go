@@ -13,6 +13,7 @@ import (
 
 	"bastionctl/internal/config"
 	"bastionctl/internal/report"
+	"bastionctl/internal/workload"
 )
 
 func TestValidateTarget(t *testing.T) {
@@ -295,10 +296,51 @@ func TestSudoersIncludesFixedResetAndUserCommands(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, expected := range []string{"server reset-plan", "server reset", "server user-add", "ops ALL=(root) NOPASSWD: BASTIONCTL"} {
+	for _, expected := range []string{"server reset-plan", "server reset", "server user-add", "server workload xhttp plan", "server workload xhttp apply", "server workload xhttp verify", "ops ALL=(root) NOPASSWD: BASTIONCTL"} {
 		if !strings.Contains(string(content), expected) {
 			t.Fatalf("missing %q in sudoers: %s", expected, content)
 		}
+	}
+}
+
+func TestRunWorkloadKeepsConfigurationInStdin(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test helper uses a POSIX script")
+	}
+	directory := t.TempDir()
+	ssh := filepath.Join(directory, "ssh")
+	payloadPath := filepath.Join(directory, "payload.json")
+	argsPath := filepath.Join(directory, "args.txt")
+	script := `#!/bin/sh
+IFS= read -r payload || true
+printf '%s\n' "$payload" > "$BASTIONCTL_TEST_PAYLOAD"
+printf '%s\n' "$*" > "$BASTIONCTL_TEST_ARGS"
+printf '%s\n' '{"schema":"bastionctl.report.v1","tool_version":"1.4.0","mode":"server","action":"workload-xhttp-plan","started_at":"2026-01-01T00:00:00Z","finished_at":"2026-01-01T00:00:01Z","summary":{"pass":1,"fail":0,"warn":0,"info":0,"planned":0,"changed":0,"skipped":0},"results":[{"control":"xhttp.dns","status":"pass","message":"ok"}]}'
+`
+	if err := os.WriteFile(ssh, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", directory+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("BASTIONCTL_TEST_PAYLOAD", payloadPath)
+	t.Setenv("BASTIONCTL_TEST_ARGS", argsPath)
+	request, err := workload.NewXHTTPConfig("vpn.example.com", "admin@example.com", "203.0.113.10", 24443)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := RunWorkload(context.Background(), config.Defaults().Admin, "1.4.0", Options{Target: "ops@example.com", Port: 22}, workload.XHTTPModule, "plan", request, false)
+	if r.HasFailures() || len(r.Results) != 1 || r.Results[0].Control != "xhttp.dns" {
+		t.Fatalf("unexpected report: %+v", r)
+	}
+	payload, err := os.ReadFile(payloadPath)
+	if err != nil || !strings.Contains(string(payload), `"domain":"vpn.example.com"`) {
+		t.Fatalf("payload=%q err=%v", payload, err)
+	}
+	args, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(args), "server' 'workload' 'xhttp' 'plan") || strings.Contains(string(args), "vpn.example.com") {
+		t.Fatalf("configuration leaked into command arguments: %s", args)
 	}
 }
 

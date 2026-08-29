@@ -1,7 +1,9 @@
 package controller
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -18,6 +20,7 @@ import (
 	"bastionctl/internal/profile"
 	"bastionctl/internal/report"
 	"bastionctl/internal/state"
+	"bastionctl/internal/workload"
 )
 
 type Controller struct {
@@ -281,6 +284,14 @@ func (c *Controller) Config(id string) (config.Config, error) {
 }
 
 func (c *Controller) SaveConfig(id string, cfg config.Config) error {
+	reconciled, err := c.withWorkloadRequirements(id, cfg)
+	if err != nil {
+		return err
+	}
+	return c.saveConfig(id, reconciled)
+}
+
+func (c *Controller) saveConfig(id string, cfg config.Config) error {
 	item, err := c.Store.Server(id)
 	if err != nil {
 		return err
@@ -304,6 +315,26 @@ func (c *Controller) SaveConfig(id string, cfg config.Config) error {
 	return c.Store.UpdateServer(item)
 }
 
+func (c *Controller) withWorkloadRequirements(id string, cfg config.Config) (config.Config, error) {
+	setup, err := c.LoadXHTTPConfig(id)
+	if os.IsNotExist(err) {
+		return cfg, nil
+	}
+	if err != nil {
+		return config.Config{}, fmt.Errorf("прочитать требования XHTTP workload: %w", err)
+	}
+	cfg.Server.AllowedTCPPorts = uniqueSortedPorts(append(
+		cfg.Server.AllowedTCPPorts,
+		workload.XHTTPChallengePort,
+		workload.XHTTPPublicPort,
+	))
+	cfg.Server.SSHLocalForwardDestinations = uniqueSortedStrings(append(
+		cfg.Server.SSHLocalForwardDestinations,
+		workload.XHTTPPanelDestination(setup),
+	))
+	return cfg, nil
+}
+
 func (c *Controller) ApplyProfile(id, name string) error {
 	cfg, err := c.Config(id)
 	if err != nil {
@@ -314,6 +345,122 @@ func (c *Controller) ApplyProfile(id, name string) error {
 		return err
 	}
 	return c.SaveConfig(id, cfg)
+}
+
+func (c *Controller) ConfigureXHTTP(id string, value workload.XHTTPConfig) (string, bool, error) {
+	item, err := c.Store.Server(id)
+	if err != nil {
+		return "", false, err
+	}
+	if err := value.Validate(); err != nil {
+		return "", false, err
+	}
+	previous, previousErr := c.LoadXHTTPConfig(id)
+	if previousErr != nil && !os.IsNotExist(previousErr) {
+		return "", false, previousErr
+	}
+	cfg, err := config.Load(item.ConfigPath)
+	if err != nil {
+		return "", false, err
+	}
+	original, err := config.Render(cfg)
+	if err != nil {
+		return "", false, err
+	}
+	beforePorts := append([]int(nil), cfg.Server.AllowedTCPPorts...)
+	beforeForwards := append([]string(nil), cfg.Server.SSHLocalForwardDestinations...)
+	if previousErr == nil {
+		cfg.Server.SSHLocalForwardDestinations = removeString(
+			cfg.Server.SSHLocalForwardDestinations,
+			workload.XHTTPPanelDestination(previous),
+		)
+	}
+	cfg.Server.AllowedTCPPorts = uniqueSortedPorts(append(cfg.Server.AllowedTCPPorts, workload.XHTTPChallengePort, workload.XHTTPPublicPort))
+	cfg.Server.SSHLocalForwardDestinations = uniqueSortedStrings(append(
+		cfg.Server.SSHLocalForwardDestinations,
+		workload.XHTTPPanelDestination(value),
+	))
+	policyChanged := !equalPorts(beforePorts, cfg.Server.AllowedTCPPorts) || !equalStrings(beforeForwards, cfg.Server.SSHLocalForwardDestinations)
+	if policyChanged {
+		if err := c.saveConfig(id, cfg); err != nil {
+			return "", false, err
+		}
+	}
+	data, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return "", false, err
+	}
+	path, err := c.Store.SaveWorkloadConfig(id, workload.XHTTPModule, append(data, '\n'))
+	if err != nil {
+		if policyChanged {
+			if _, restoreErr := c.Store.SaveServerConfig(id, original); restoreErr != nil {
+				return "", false, errors.Join(err, fmt.Errorf("откатить локальную политику: %w", restoreErr))
+			}
+		}
+		return "", false, err
+	}
+	return path, policyChanged, nil
+}
+
+func (c *Controller) LoadXHTTPConfig(id string) (workload.XHTTPConfig, error) {
+	data, err := c.Store.LoadWorkloadConfig(id, workload.XHTTPModule)
+	if err != nil {
+		return workload.XHTTPConfig{}, err
+	}
+	var value workload.XHTTPConfig
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&value); err != nil {
+		return workload.XHTTPConfig{}, err
+	}
+	if decoder.Decode(&struct{}{}) != io.EOF {
+		return workload.XHTTPConfig{}, errors.New("после XHTTP-конфигурации обнаружены лишние данные")
+	}
+	if err := value.Validate(); err != nil {
+		return workload.XHTTPConfig{}, err
+	}
+	return value, nil
+}
+
+func (c *Controller) RunWorkload(ctx context.Context, id, module, action string, request workload.XHTTPConfig, yes bool) (*OperationResult, error) {
+	if module != workload.XHTTPModule || !workload.IsXHTTPAction(action) {
+		return nil, errors.New("поддерживается workload xhttp plan|apply|verify")
+	}
+	if action == "apply" && !yes {
+		return nil, errors.New("workload xhttp apply требует явного подтверждения")
+	}
+	if err := request.Validate(); err != nil {
+		return nil, err
+	}
+	item, err := c.Store.Server(id)
+	if err != nil {
+		return nil, err
+	}
+	if item.BootstrapPending {
+		return nil, errors.New("сначала выполните первичный SSH-вход: fleet bootstrap " + item.ID)
+	}
+	cfg, err := config.Load(item.ConfigPath)
+	if err != nil {
+		return nil, err
+	}
+	reportAction := workload.XHTTPReportAction(action)
+	previous, previousErr := c.Store.LatestReport(id, reportAction)
+	if previousErr != nil && !os.IsNotExist(previousErr) {
+		return nil, previousErr
+	}
+	r := admin.RunWorkload(ctx, cfg.Admin, c.Version, admin.Options{
+		Target: item.Target, Port: item.Port, Identity: item.Identity,
+	}, module, action, request, yes)
+	if !transportFailed(r) {
+		promoted, promoteErr := c.promoteStrictHostKey(id, &cfg)
+		if promoteErr != nil {
+			return nil, promoteErr
+		}
+		if promoted {
+			r.Warnings = append(r.Warnings, "первое соединение успешно: дальнейшая проверка SSH host key переключена в строгий режим")
+		}
+	}
+	return c.recordOperation(id, item, reportAction, r, previous)
 }
 
 func (c *Controller) RunAction(ctx context.Context, id, action string, yes bool) (*OperationResult, error) {
@@ -341,7 +488,6 @@ func (c *Controller) RunAction(ctx context.Context, id, action string, yes bool)
 	r := admin.Run(ctx, cfg.Admin, c.Version, admin.Options{
 		Action: action, Target: item.Target, Port: item.Port, Identity: item.Identity, Yes: yes,
 	})
-	newFindings := findNewFailures(previous, r)
 	if !transportFailed(r) {
 		promoted, promoteErr := c.promoteStrictHostKey(id, &cfg)
 		if promoteErr != nil {
@@ -351,6 +497,11 @@ func (c *Controller) RunAction(ctx context.Context, id, action string, yes bool)
 			r.Warnings = append(r.Warnings, "первое соединение успешно: дальнейшая проверка SSH host key переключена в строгий режим")
 		}
 	}
+	return c.recordOperation(id, item, action, r, previous)
+}
+
+func (c *Controller) recordOperation(id string, item state.ManagedServer, action string, r *report.Report, previous *report.Report) (*OperationResult, error) {
+	newFindings := findNewFailures(previous, r)
 	historyPath, err := c.Store.SaveReport(id, r)
 	if err != nil {
 		return nil, err
@@ -672,6 +823,70 @@ func cleanStrings(values []string) []string {
 		result = append(result, value)
 	}
 	sort.Strings(result)
+	return result
+}
+
+func uniqueSortedPorts(values []int) []int {
+	seen := make(map[int]struct{}, len(values))
+	for _, value := range values {
+		seen[value] = struct{}{}
+	}
+	result := make([]int, 0, len(seen))
+	for value := range seen {
+		result = append(result, value)
+	}
+	sort.Ints(result)
+	return result
+}
+
+func equalPorts(left, right []int) bool {
+	left = uniqueSortedPorts(left)
+	right = uniqueSortedPorts(right)
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
+}
+
+func uniqueSortedStrings(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		seen[value] = struct{}{}
+	}
+	result := make([]string, 0, len(seen))
+	for value := range seen {
+		result = append(result, value)
+	}
+	sort.Strings(result)
+	return result
+}
+
+func equalStrings(left, right []string) bool {
+	left = uniqueSortedStrings(left)
+	right = uniqueSortedStrings(right)
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
+}
+
+func removeString(values []string, removed string) []string {
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		if value != removed {
+			result = append(result, value)
+		}
+	}
 	return result
 }
 

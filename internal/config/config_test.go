@@ -73,6 +73,7 @@ func TestRenderRoundTrip(t *testing.T) {
 	cfg.Server.Profile = "web"
 	cfg.Server.AdminUser = "operator"
 	cfg.Server.SSHAllowedCIDRs = []string{"203.0.113.7/32"}
+	cfg.Server.SSHLocalForwardDestinations = []string{"127.0.0.1:24443"}
 	cfg.Server.AllowedTCPPorts = []int{443, 80, 443}
 	cfg.Server.BackupMarkers = []string{"/var/lib/backup/ok"}
 	cfg.Server.BackupRequired = true
@@ -95,8 +96,29 @@ func TestRenderRoundTrip(t *testing.T) {
 	if !reflect.DeepEqual(loaded.Server.AllowedTCPPorts, []int{80, 443}) {
 		t.Fatalf("ports not canonical: %v", loaded.Server.AllowedTCPPorts)
 	}
+	if !reflect.DeepEqual(loaded.Server.SSHLocalForwardDestinations, []string{"127.0.0.1:24443"}) {
+		t.Fatalf("local forwards not preserved: %v", loaded.Server.SSHLocalForwardDestinations)
+	}
 	if loaded.Admin.StrictHostKeyChecking {
 		t.Fatal("admin policy was not preserved")
+	}
+}
+
+func TestValidateRejectsBroadLocalForwardPolicy(t *testing.T) {
+	for _, destination := range []string{"0.0.0.0:24443", "example.com:443", "127.0.0.1:0", "127.0.0.1:70000"} {
+		cfg := Defaults()
+		cfg.Server.AdminUser = "operator"
+		cfg.Server.SSHLocalForwardDestinations = []string{destination}
+		if err := cfg.Validate(); err == nil {
+			t.Fatalf("unsafe destination accepted: %q", destination)
+		}
+	}
+	cfg := Defaults()
+	cfg.Server.AdminUser = "operator"
+	cfg.Server.AllowTCPForwarding = true
+	cfg.Server.SSHLocalForwardDestinations = []string{"127.0.0.1:24443"}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("narrow exception accepted with global forwarding enabled")
 	}
 }
 

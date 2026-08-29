@@ -19,6 +19,7 @@ import (
 	"bastionctl/internal/report"
 	"bastionctl/internal/server"
 	"bastionctl/internal/state"
+	"bastionctl/internal/workload"
 )
 
 const (
@@ -93,8 +94,11 @@ func runConsole(ctx context.Context, args []string, version string, stdin io.Rea
 }
 
 func runServer(ctx context.Context, action string, args []string, version string, stdin io.Reader, stdout, stderr io.Writer) int {
+	if action == "workload" {
+		return runServerWorkload(ctx, args, version, stdin, stdout, stderr)
+	}
 	if action != "audit" && action != "plan" && action != "apply" && action != "snapshot" && action != "reset-plan" && action != "reset" && action != "user-add" {
-		return usageError(stderr, "server поддерживает audit, plan, apply, snapshot, reset-plan, reset и user-add")
+		return usageError(stderr, "server поддерживает audit, plan, apply, snapshot, reset-plan, reset, user-add и workload")
 	}
 	specification := map[string]bool{"--config": true, "--json": false}
 	if action == "apply" || action == "reset" || action == "user-add" {
@@ -151,6 +155,45 @@ func runServer(ctx context.Context, action string, args []string, version string
 	}
 	if r.HasFailures() {
 		if action == "apply" || action == "reset" {
+			return exitPermission
+		}
+		return exitFindings
+	}
+	return exitOK
+}
+
+func runServerWorkload(ctx context.Context, args []string, version string, stdin io.Reader, stdout, stderr io.Writer) int {
+	parsed, err := parse(args, map[string]bool{"--config": true, "--json": false, "--yes": false})
+	if err != nil {
+		return usageError(stderr, err.Error())
+	}
+	if len(parsed.positionals) != 2 {
+		return usageError(stderr, "server workload требует MODULE ACTION")
+	}
+	module, action := parsed.positionals[0], parsed.positionals[1]
+	if module != workload.XHTTPModule || !workload.IsXHTTPAction(action) {
+		return usageError(stderr, "поддерживается workload xhttp plan|apply|verify")
+	}
+	if action == "apply" && !parsed.booleans["--yes"] {
+		return usageError(stderr, "server workload xhttp apply требует --yes")
+	}
+	configPath := parsed.values["--config"]
+	if configPath == "" {
+		configPath = "/etc/bastionctl/config.toml"
+	}
+	loadedConfig, err := config.Load(configPath)
+	if err != nil {
+		return usageError(stderr, err.Error())
+	}
+	r := workload.Run(ctx, version, module, action, stdin, parsed.booleans["--yes"], workload.RuntimePolicy{
+		AdminUser:                   loadedConfig.Server.AdminUser,
+		SSHLocalForwardDestinations: append([]string(nil), loadedConfig.Server.SSHLocalForwardDestinations...),
+	})
+	if err := writeReport(stdout, r, parsed.booleans["--json"]); err != nil {
+		return outputError(stderr, err)
+	}
+	if r.HasFailures() {
+		if action == "apply" {
 			return exitPermission
 		}
 		return exitFindings
@@ -323,6 +366,93 @@ func runFleet(ctx context.Context, action string, args []string, version string,
 		return fleetAdd(control, parsed, stdout, stderr)
 	case "configure":
 		return fleetConfigure(control, parsed, stdout, stderr)
+	case "xhttp-config":
+		id, ok := oneID(parsed, stderr)
+		if !ok {
+			return exitUsage
+		}
+		for _, name := range []string{"--domain", "--email", "--server-ip"} {
+			if parsed.values[name] == "" {
+				return usageError(stderr, "fleet xhttp-config требует --domain, --email и --server-ip")
+			}
+		}
+		panelPort := 0
+		if raw := parsed.values["--panel-port"]; raw != "" {
+			panelPort, err = strconv.Atoi(raw)
+			if err != nil || panelPort < 1024 || panelPort > 65535 {
+				return usageError(stderr, "--panel-port должен быть числом 1024..65535")
+			}
+		}
+		setup, err := workload.NewXHTTPConfig(parsed.values["--domain"], parsed.values["--email"], parsed.values["--server-ip"], panelPort)
+		if err != nil {
+			return usageError(stderr, err.Error())
+		}
+		path, changed, err := control.ConfigureXHTTP(id, setup)
+		if err != nil {
+			return commandError(stderr, err)
+		}
+		if jsonOutput {
+			if err := writeJSON(stdout, setup); err != nil {
+				return outputError(stderr, err)
+			}
+		} else {
+			_, _ = fmt.Fprintf(stdout, "XHTTP-параметры сохранены: %s\n", path)
+			if changed {
+				_, _ = fmt.Fprintln(stdout, "В желаемую политику добавлены TCP 80/443 и узкий SSH local-forward к loopback-панели. Выполните fleet install, plan и apply.")
+			}
+		}
+		return exitOK
+	case "xhttp-plan", "xhttp-apply", "xhttp-verify":
+		id, ok := oneID(parsed, stderr)
+		if !ok {
+			return exitUsage
+		}
+		xhttpAction := strings.TrimPrefix(action, "xhttp-")
+		if xhttpAction == "apply" && !parsed.booleans["--yes"] {
+			return usageError(stderr, "fleet xhttp-apply требует отдельный xhttp-plan и --yes")
+		}
+		setup, err := control.LoadXHTTPConfig(id)
+		if err != nil {
+			return commandError(stderr, err)
+		}
+		result, err := control.RunWorkload(ctx, id, workload.XHTTPModule, xhttpAction, setup, parsed.booleans["--yes"])
+		if err != nil {
+			return commandError(stderr, err)
+		}
+		if err := writeOperation(stdout, result, jsonOutput); err != nil {
+			return outputError(stderr, err)
+		}
+		if result.Report.HasFailures() {
+			return exitFindings
+		}
+		return exitOK
+	case "xhttp-guide":
+		id, ok := oneID(parsed, stderr)
+		if !ok {
+			return exitUsage
+		}
+		item, err := control.Store.Server(id)
+		if err != nil {
+			return commandError(stderr, err)
+		}
+		setup, err := control.LoadXHTTPConfig(id)
+		if err != nil {
+			return commandError(stderr, err)
+		}
+		steps := workload.ManualGuide(setup, item.Target, item.Identity, item.Port, 18080)
+		if jsonOutput {
+			if err := writeJSON(stdout, steps); err != nil {
+				return outputError(stderr, err)
+			}
+		} else {
+			for index, step := range steps {
+				_, _ = fmt.Fprintf(stdout, "%d. %s\n", index+1, step.Title)
+				for _, detail := range step.Details {
+					_, _ = fmt.Fprintln(stdout, "   -", detail)
+				}
+			}
+		}
+		return exitOK
 	case "remove":
 		id, ok := oneID(parsed, stderr)
 		if !ok {
@@ -543,7 +673,7 @@ func fleetSpecification(action string) (map[string]bool, bool) {
 	specification := map[string]bool{"--state-dir": true, "--json": false}
 	add := func(name string, value bool) { specification[name] = value }
 	switch action {
-	case "list", "profiles", "diff", "audit", "plan", "reset-plan", "audit-all", "bootstrap":
+	case "list", "profiles", "diff", "audit", "plan", "reset-plan", "audit-all", "bootstrap", "xhttp-plan", "xhttp-verify", "xhttp-guide":
 	case "add":
 		for _, name := range []string{"--name", "--port", "--identity", "--profile", "--ssh-cidrs", "--tcp-ports", "--udp-ports", "--backup-markers", "--backup-max-age", "--server-binary"} {
 			add(name, true)
@@ -561,6 +691,13 @@ func fleetSpecification(action string) (map[string]bool, bool) {
 		}
 	case "remove", "apply", "reset", "baseline":
 		add("--yes", false)
+	case "xhttp-apply":
+		add("--yes", false)
+	case "xhttp-config":
+		add("--domain", true)
+		add("--email", true)
+		add("--server-ip", true)
+		add("--panel-port", true)
 	case "user-add":
 		add("--username", true)
 		add("--public-key", true)
@@ -1003,6 +1140,11 @@ func Help(version string) string {
   bastionctl fleet install ID [--binary PATH] [--interactive-sudo]
   bastionctl fleet audit|plan ID [--json]
   bastionctl fleet apply ID --yes [--json]
+  bastionctl fleet xhttp-config ID --domain NAME --email ADDRESS --server-ip IP [--panel-port N]
+  bastionctl fleet xhttp-plan ID [--json]
+  bastionctl fleet xhttp-apply ID --yes [--json]
+  bastionctl fleet xhttp-verify ID [--json]
+  bastionctl fleet xhttp-guide ID [--json]
   bastionctl fleet user-add ID --username NAME --public-key PATH --yes [--sudo --set-password]
   bastionctl fleet reset-plan ID [--json]
   bastionctl fleet reset ID --yes [--json]
@@ -1021,6 +1163,8 @@ func Help(version string) string {
   bastionctl server reset-plan [--config PATH] [--json]
   bastionctl server reset --yes [--config PATH] [--json]
   bastionctl server user-add --yes [--config PATH] [--json] < request.json
+  bastionctl server workload xhttp plan|verify [--config PATH] [--json] < xhttp.json
+  bastionctl server workload xhttp apply --yes [--config PATH] [--json] < xhttp.json
 
 Прямой admin-режим:
   bastionctl admin doctor [--identity PATH] [--json]
@@ -1037,6 +1181,7 @@ func Help(version string) string {
   apply требует отдельный plan и явное подтверждение;
   reset требует отдельный reset-plan и удаляет только помеченную политику bastionctl;
   user-add устанавливает только публичный Ed25519-ключ и не заменяет существующие ключи;
+  xhttp-apply использует закреплённый 3x-ui release с SHA-256; панель остаётся на loopback, SSH local-forward ограничен точным PermitOpen;
   пароль первого входа обрабатывает только OpenSSH и приложение его не хранит;
   после bootstrap SSH использует BatchMode и строгую проверку host key;
   перед включением firewall проверяются ключ, sudo, sshd и текущая SSH-сессия.

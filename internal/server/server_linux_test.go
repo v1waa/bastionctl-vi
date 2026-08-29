@@ -55,6 +55,29 @@ func TestAuditOnlyControlPreservesBlockingFindingDuringApply(t *testing.T) {
 	}
 }
 
+func TestDesiredSSHConfigUsesNarrowLocalForwardMatch(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Server.AdminUser = "operator"
+	cfg.Server.SSHLocalForwardDestinations = []string{"127.0.0.1:24443"}
+	ctx := &serverContext{config: cfg}
+	content := desiredSSHConfig(ctx)
+	for _, expected := range []string{
+		"AllowTcpForwarding no",
+		"Match User operator",
+		"AllowTcpForwarding local",
+		"PermitOpen 127.0.0.1:24443",
+		"Match all",
+	} {
+		if !strings.Contains(content, expected) {
+			t.Fatalf("SSH config lacks %q:\n%s", expected, content)
+		}
+	}
+	expected := expectedSSHValues(ctx)
+	if expected["allowtcpforwarding"] != "local" || expected["permitopen"] != "127.0.0.1:24443" {
+		t.Fatalf("effective expectations=%v", expected)
+	}
+}
+
 func TestPreflightManagedPathRejectsSymlink(t *testing.T) {
 	directory := t.TempDir()
 	target := filepath.Join(directory, "target")

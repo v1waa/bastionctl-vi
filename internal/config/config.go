@@ -18,41 +18,42 @@ type Config struct {
 }
 
 type ServerConfig struct {
-	Profile                    string
-	AdminUser                  string
-	ManageSSH                  bool
-	ManageFirewall             bool
-	ManageFail2ban             bool
-	ManageAutomaticUpdates     bool
-	ManageSysctl               bool
-	ManageJournald             bool
-	ManageAuditd               bool
-	ManageAppArmor             bool
-	ManageTimeSync             bool
-	ManagePermissions          bool
-	PasswordAuthentication     bool
-	PermitRootLogin            bool
-	AllowTCPForwarding         bool
-	AllowStreamLocalForwarding bool
-	AllowAgentForwarding       bool
-	X11Forwarding              bool
-	MaxAuthTries               int
-	LoginGraceTime             int
-	ClientAliveInterval        int
-	ClientAliveCountMax        int
-	SSHAllowedCIDRs            []string
-	AllowedTCPPorts            []int
-	AllowedUDPPorts            []int
-	Fail2banMaxRetry           int
-	Fail2banFindTime           string
-	Fail2banBanTime            string
-	AutomaticReboot            bool
-	AutomaticRebootTime        string
-	JournalMaxUse              string
-	RPFilter                   int
-	BackupMarkers              []string
-	BackupMaxAgeHours          int
-	BackupRequired             bool
+	Profile                     string
+	AdminUser                   string
+	ManageSSH                   bool
+	ManageFirewall              bool
+	ManageFail2ban              bool
+	ManageAutomaticUpdates      bool
+	ManageSysctl                bool
+	ManageJournald              bool
+	ManageAuditd                bool
+	ManageAppArmor              bool
+	ManageTimeSync              bool
+	ManagePermissions           bool
+	PasswordAuthentication      bool
+	PermitRootLogin             bool
+	AllowTCPForwarding          bool
+	AllowStreamLocalForwarding  bool
+	AllowAgentForwarding        bool
+	X11Forwarding               bool
+	MaxAuthTries                int
+	LoginGraceTime              int
+	ClientAliveInterval         int
+	ClientAliveCountMax         int
+	SSHAllowedCIDRs             []string
+	SSHLocalForwardDestinations []string
+	AllowedTCPPorts             []int
+	AllowedUDPPorts             []int
+	Fail2banMaxRetry            int
+	Fail2banFindTime            string
+	Fail2banBanTime             string
+	AutomaticReboot             bool
+	AutomaticRebootTime         string
+	JournalMaxUse               string
+	RPFilter                    int
+	BackupMarkers               []string
+	BackupMaxAgeHours           int
+	BackupRequired              bool
 }
 
 type AdminConfig struct {
@@ -73,7 +74,8 @@ func Defaults() Config {
 			AllowTCPForwarding: false, AllowStreamLocalForwarding: false,
 			AllowAgentForwarding: false, X11Forwarding: false,
 			MaxAuthTries: 3, LoginGraceTime: 30, ClientAliveInterval: 300, ClientAliveCountMax: 2,
-			SSHAllowedCIDRs: []string{}, AllowedTCPPorts: []int{}, AllowedUDPPorts: []int{},
+			SSHAllowedCIDRs: []string{}, SSHLocalForwardDestinations: []string{},
+			AllowedTCPPorts: []int{}, AllowedUDPPorts: []int{},
 			Fail2banMaxRetry: 5, Fail2banFindTime: "10m", Fail2banBanTime: "1h",
 			AutomaticReboot: false, AutomaticRebootTime: "03:30", JournalMaxUse: "1G", RPFilter: 2,
 			BackupMarkers: []string{}, BackupMaxAgeHours: 26, BackupRequired: false,
@@ -237,6 +239,8 @@ func assign(cfg *Config, section, key, raw string) error {
 			return parseIntoInt(raw, &s.ClientAliveCountMax)
 		case "ssh_allowed_cidrs":
 			return parseStringArray(raw, &s.SSHAllowedCIDRs)
+		case "ssh_local_forward_destinations":
+			return parseStringArray(raw, &s.SSHLocalForwardDestinations)
 		case "allowed_tcp_ports":
 			return parseIntArray(raw, &s.AllowedTCPPorts)
 		case "allowed_udp_ports":
@@ -442,7 +446,19 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("server.ssh_allowed_cidrs: %q не является CIDR", cidr)
 		}
 	}
+	if len(s.SSHLocalForwardDestinations) > 0 {
+		if !s.ManageSSH || s.AdminUser == "" {
+			return errors.New("server.ssh_local_forward_destinations требует manage_ssh=true и admin_user")
+		}
+		if s.AllowTCPForwarding {
+			return errors.New("server.ssh_local_forward_destinations несовместим с глобальным allow_tcp_forwarding=true")
+		}
+	}
 	var err error
+	s.SSHLocalForwardDestinations, err = validateLocalForwardDestinations(s.SSHLocalForwardDestinations)
+	if err != nil {
+		return err
+	}
 	if s.AllowedTCPPorts, err = validatePorts("server.allowed_tcp_ports", s.AllowedTCPPorts); err != nil {
 		return err
 	}
@@ -493,6 +509,7 @@ func Render(c Config) ([]byte, error) {
 	fmt.Fprintf(&output, "client_alive_interval = %d\n", s.ClientAliveInterval)
 	fmt.Fprintf(&output, "client_alive_count_max = %d\n\n", s.ClientAliveCountMax)
 	fmt.Fprintf(&output, "ssh_allowed_cidrs = %s\n", renderStringArray(s.SSHAllowedCIDRs))
+	fmt.Fprintf(&output, "ssh_local_forward_destinations = %s\n", renderStringArray(s.SSHLocalForwardDestinations))
 	fmt.Fprintf(&output, "allowed_tcp_ports = %s\n", renderIntArray(s.AllowedTCPPorts))
 	fmt.Fprintf(&output, "allowed_udp_ports = %s\n\n", renderIntArray(s.AllowedUDPPorts))
 	fmt.Fprintf(&output, "fail2ban_maxretry = %d\n", s.Fail2banMaxRetry)
@@ -542,5 +559,26 @@ func validatePorts(name string, ports []int) ([]int, error) {
 		result = append(result, port)
 	}
 	sort.Ints(result)
+	return result, nil
+}
+
+func validateLocalForwardDestinations(values []string) ([]string, error) {
+	unique := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		host, portRaw, err := net.SplitHostPort(value)
+		if err != nil || host != "127.0.0.1" {
+			return nil, fmt.Errorf("server.ssh_local_forward_destinations: %q должен иметь вид 127.0.0.1:PORT", value)
+		}
+		port, err := strconv.Atoi(portRaw)
+		if err != nil || port < 1 || port > 65535 {
+			return nil, fmt.Errorf("server.ssh_local_forward_destinations: недопустимый порт в %q", value)
+		}
+		unique[net.JoinHostPort(host, strconv.Itoa(port))] = struct{}{}
+	}
+	result := make([]string, 0, len(unique))
+	for value := range unique {
+		result = append(result, value)
+	}
+	sort.Strings(result)
 	return result, nil
 }

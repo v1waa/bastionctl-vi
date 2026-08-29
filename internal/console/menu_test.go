@@ -17,7 +17,7 @@ func TestMenuRegistryHasOneCommandPerID(t *testing.T) {
 			t.Fatalf("command %d lacks group or handler", command.id)
 		}
 	}
-	for id := 0; id <= 15; id++ {
+	for id := 0; id <= 16; id++ {
 		if !seen[id] {
 			t.Fatalf("command id %d is missing", id)
 		}
@@ -33,6 +33,10 @@ func TestMenuRegistryKeepsNumbersAndAliasesEquivalent(t *testing.T) {
 	byAlias, ok := findMenuCommand(commands, "user-add")
 	if !ok || byAlias.id != byNumber.id {
 		t.Fatalf("number=%d alias=%d ok=%v", byNumber.id, byAlias.id, ok)
+	}
+	xhttp, ok := findMenuCommand(commands, "3x-ui")
+	if !ok || xhttp.id != 16 {
+		t.Fatalf("xhttp=%d ok=%v", xhttp.id, ok)
 	}
 	exit, ok := findMenuCommand(commands, "q")
 	if !ok || exit.id != 0 {

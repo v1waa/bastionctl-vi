@@ -13,7 +13,8 @@
 
 ## Safety properties
 
-- `audit`, `plan`, `snapshot`, and `reset-plan` are read-only.
+- `audit`, `plan`, `snapshot`, `reset-plan`, `workload xhttp plan`, and
+  `workload xhttp verify` are read-only.
 - `apply` requires Linux, root, an explicit `--yes`, a supported platform, and
   an exclusive process lock.
 - Every enabled control completes preflight before configuration changes begin.
@@ -62,6 +63,33 @@
   parsing and fixed hitboxes. The temporary raw/VT terminal state and mouse
   reporting are disabled before any prompt, OpenSSH process, or command
   handler runs; redirected input uses the unchanged line-mode path.
+- XHTTP setup requires a separate server-side preflight and explicit `--yes`.
+  It checks exact DNS A/AAAA results, supported OS/architecture, minimum
+  capacity, free listeners, UFW default-deny plus TCP 80/443, and rejects an
+  existing 3x-ui installation without a bastionctl ownership marker.
+- The 3x-ui release tag and amd64/arm64 SHA-256 values are fixed in source.
+  Download redirects remain on an HTTPS host allowlist, archive/download sizes
+  are bounded, and extraction rejects traversal, symlinks, hardlinks and
+  special files before any release file is installed as root.
+- The 3x-ui panel is configured on `127.0.0.1` only. Its random initial
+  credentials are generated on the server, stored as 0600 below a 0700
+  root-only workload directory, omitted from JSON reports, and intended for
+  deletion after SSH-tunnel login and 2FA enrollment. The panel port is never
+  added to UFW.
+- The base SSH policy keeps global TCP forwarding disabled. The XHTTP desired
+  state adds one `Match User` exception for the managed administrator with
+  `AllowTcpForwarding local` and exact loopback-only `PermitOpen`. Effective
+  configuration is checked for both that administrator and a nonmatching user.
+- Certificates are obtained with the distribution Certbot package. The
+  resulting certificate hostname, validity window, archive path and private-key
+  owner/mode are checked before service activation.
+- The x-ui database and log directories are root-owned and hidden from other
+  users. A separate managed systemd drop-in applies a restrictive umask,
+  `NoNewPrivileges`, private temporary storage, protected home/kernel/control
+  groups, and `RestrictSUIDSGID`; effective properties are verified after start.
+  A root-only managed environment file fixes the SQLite backend and prevents an
+  unrelated pre-existing `/etc/default/x-ui` from silently changing database
+  behavior.
 
 ## Trust boundaries
 
@@ -82,6 +110,9 @@ back up the workstation accordingly.
 Package installation trusts the configured distribution repositories. Service
 validators (`sshd`, `apt-config`, `augenrules`, `fail2ban-client`, `systemctl`,
 and `sysctl`) remain authoritative for their own configuration formats.
+The pinned upstream 3x-ui/Xray binaries are an additional trusted component for
+the optional XHTTP workload. SHA-256 proves that fetched bytes match the
+reviewed release metadata; it does not independently prove upstream code safe.
 
 ## Explicit non-goals
 
@@ -93,11 +124,23 @@ directories, or service data. Reset is removal of bastionctl-owned policy, not
 an operating-system factory reset. It is a baseline hardening assistant, not a
 compliance attestation.
 
+The XHTTP wizard does not buy domains, edit provider firewalls, create 3x-ui
+inbounds or client UUIDs, enroll panel 2FA, configure a client, test censorship
+resistance, or promise that one XHTTP mode works on every network. It provides
+concrete manual instructions and verifies observable server state. Base-policy
+reset does not remove the optional workload, certificates or its data because
+those belong to a separate service ownership boundary and may be user data.
+Reset does remove the narrow tunnel exception together with the common managed
+SSH drop-in, leaving the still-installed panel unreachable from the network
+until the base policy is applied again.
+
 The application never collects an interactive sudo password. When requested,
 it allocates an SSH TTY and the remote `sudo` program reads the password itself.
 The generated ongoing policy grants only exact bastionctl
 audit/plan/apply/snapshot/reset-plan/reset/user-add commands. The variable
-user-add request travels through stdin rather than sudo command arguments.
+user-add request travels through stdin rather than sudo command arguments. The
+optional XHTTP module adds only exact `workload xhttp plan/apply/verify`
+commands; its non-secret desired state also travels through stdin.
 Replacing the root-owned executable remains outside that policy and can require
 another interactive sudo prompt.
 
@@ -108,6 +151,12 @@ file metadata corrections, runtime sysctl transitions, service enablement, and
 UFW rule additions may have effects that cannot be transactionally reversed.
 The engine stops on the first apply failure, reports the backup directory, and
 never proceeds to firewall after an earlier failure.
+
+XHTTP apply backs up and restores only its fixed managed paths and prior service
+state. Distribution packages and Certbot/Let's Encrypt state are shared and are
+not automatically removed on rollback; the report states this limit. A manual
+inbound created after installation is service data and is not modified by the
+base hardening reset.
 
 Reset deliberately preserves packages, shared service enablement, UFW
 enable/default policy, user accounts, and keys because their pre-bastionctl

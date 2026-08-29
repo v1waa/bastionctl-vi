@@ -69,6 +69,7 @@ type Store struct {
 }
 
 var idPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,31}$`)
+var workloadPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`)
 
 func DefaultRoot() (string, error) {
 	directory, err := os.UserConfigDir()
@@ -284,6 +285,43 @@ func (s *Store) SaveServerConfig(id string, data []byte) (string, error) {
 		return "", err
 	}
 	return path, nil
+}
+
+func (s *Store) SaveWorkloadConfig(id, name string, data []byte) (string, error) {
+	if !workloadPattern.MatchString(name) {
+		return "", errors.New("имя workload должно содержать 1–32 символа: a-z, 0-9 или дефис")
+	}
+	directory, err := s.ServerDirectory(id)
+	if err != nil {
+		return "", err
+	}
+	directory = filepath.Join(directory, "workloads")
+	if info, statErr := os.Lstat(directory); statErr == nil {
+		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return "", errors.New("каталог workloads должен быть обычным каталогом без symlink")
+		}
+	} else if !os.IsNotExist(statErr) {
+		return "", statErr
+	}
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		return "", err
+	}
+	_ = os.Chmod(directory, 0o700)
+	path := filepath.Join(directory, name+".json")
+	if err := atomicWrite(path, data, 0o600); err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
+func (s *Store) LoadWorkloadConfig(id, name string) ([]byte, error) {
+	if err := ValidateID(id); err != nil {
+		return nil, err
+	}
+	if !workloadPattern.MatchString(name) {
+		return nil, errors.New("недопустимое имя workload")
+	}
+	return readRegular(filepath.Join(s.root, "servers", id, "workloads", name+".json"))
 }
 
 func (s *Store) SaveReport(id string, value *report.Report) (string, error) {

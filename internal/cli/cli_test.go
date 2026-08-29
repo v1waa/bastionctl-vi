@@ -37,7 +37,7 @@ func TestHelp(t *testing.T) {
 	if code := Run(context.Background(), []string{"help"}, "test", strings.NewReader(""), &stdout, &stderr); code != exitOK {
 		t.Fatalf("code=%d", code)
 	}
-	if !strings.Contains(stdout.String(), "server audit") || !strings.Contains(stdout.String(), "admin doctor") || !strings.Contains(stdout.String(), "--password-bootstrap") || !strings.Contains(stdout.String(), "fleet bootstrap") || !strings.Contains(stdout.String(), "fleet user-add") || !strings.Contains(stdout.String(), "fleet reset-plan") {
+	if !strings.Contains(stdout.String(), "server audit") || !strings.Contains(stdout.String(), "admin doctor") || !strings.Contains(stdout.String(), "--password-bootstrap") || !strings.Contains(stdout.String(), "fleet bootstrap") || !strings.Contains(stdout.String(), "fleet user-add") || !strings.Contains(stdout.String(), "fleet reset-plan") || !strings.Contains(stdout.String(), "fleet xhttp-config") || !strings.Contains(stdout.String(), "server workload xhttp") {
 		t.Fatalf("incomplete help: %s", stdout.String())
 	}
 }
@@ -62,6 +62,38 @@ func TestPasswordBootstrapFlagsAreActionScoped(t *testing.T) {
 	reset, ok := fleetSpecification("reset")
 	if !ok || reset["--yes"] {
 		t.Fatalf("unexpected reset specification: %+v", reset)
+	}
+	xhttpConfig, ok := fleetSpecification("xhttp-config")
+	if !ok || !xhttpConfig["--domain"] || !xhttpConfig["--email"] || !xhttpConfig["--server-ip"] {
+		t.Fatalf("unexpected xhttp-config specification: %+v", xhttpConfig)
+	}
+	xhttpApply, ok := fleetSpecification("xhttp-apply")
+	if !ok || xhttpApply["--yes"] {
+		t.Fatalf("unexpected xhttp-apply specification: %+v", xhttpApply)
+	}
+}
+
+func TestFleetXHTTPConfigAndGuide(t *testing.T) {
+	stateDir := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	code := Run(context.Background(), []string{"fleet", "add", "vpn", "ops@203.0.113.10", "--state-dir", stateDir}, "test", strings.NewReader(""), &stdout, &stderr)
+	if code != exitOK {
+		t.Fatalf("add code=%d stderr=%q", code, stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	code = Run(context.Background(), []string{
+		"fleet", "xhttp-config", "vpn", "--state-dir", stateDir,
+		"--domain", "vpn.example.com", "--email", "admin@example.com", "--server-ip", "203.0.113.10", "--panel-port", "24443",
+	}, "test", strings.NewReader(""), &stdout, &stderr)
+	if code != exitOK || !strings.Contains(stdout.String(), "TCP 80/443") {
+		t.Fatalf("config code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	code = Run(context.Background(), []string{"fleet", "xhttp-guide", "vpn", "--state-dir", stateDir}, "test", strings.NewReader(""), &stdout, &stderr)
+	if code != exitOK || !strings.Contains(stdout.String(), "ssh -N -L 127.0.0.1:18080") || !strings.Contains(stdout.String(), "VLESS + TLS + XHTTP") {
+		t.Fatalf("guide code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
 }
 
