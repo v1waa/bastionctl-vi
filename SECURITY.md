@@ -2,7 +2,7 @@
 
 ## Assumptions
 
-- The supported 2.0 server starts from a vendor-maintained Ubuntu 22.04/24.04
+- The supported 2.1 server starts from a vendor-maintained Ubuntu 22.04/24.04
   LTS image. Debian code paths remain compatibility-only until a later release.
 - The operator controls either an existing non-root sudo account with a valid
   public-key login or the initial root/non-root SSH password issued for a new
@@ -39,13 +39,17 @@
   and lets the remote `passwd` program collect an account password directly.
   If sudo is absent, this explicit bootstrap may install the signed distribution
   package through the host's already configured apt repositories.
-- Remote installation verifies server architecture, local ELF metadata and
-  SHA-256 after upload; a sudoers policy is validated with `visudo -cf` before
-  root-owned installation.
+- Remote installation read-only verifies Ubuntu and architecture first. The
+  matching amd64/arm64 ELF is embedded in the production Windows executable,
+  validated again in memory, and disclosed with its size, SHA-256 and target
+  paths before exact `INSTALL <server-id>` confirmation. A sudoers policy is
+  validated with `visudo -cf` before root-owned installation.
 - Desktop uploads are restricted to random
-  `/tmp/bastionctl-{bin,config,sudoers}-<24 hex>` paths. Interactive installation
-  runs in a remote PTY, saves prior root-owned files, rolls back on failure and
-  performs a new version probe before reporting success.
+  `/tmp/bastionctl-{bin,config,sudoers}-<24 hex>` paths. The embedded ELF is
+  streamed directly from memory; the receiver checks its exact byte count and
+  the install transaction checks SHA-256. Interactive installation runs in a
+  remote PTY, saves prior root-owned files, rolls back on failure and accepts
+  success only when a new probe returns the same version as the Windows app.
 - `user-add` accepts a versioned JSON request through stdin of one fixed sudo
   command. Both sides validate the conservative username and Ed25519 key. The
   server opens `.ssh` and `authorized_keys` with no-follow semantics, checks
@@ -69,7 +73,7 @@
   client and OpenSSH fallback use the same file. Changed keys fail closed;
   replacement requires exact `REPLACE <fingerprint>` and preserves the prior
   record as `known_hosts.previous`.
-- Production frontend assets are compiled into the signed/hashed executable;
+- Production frontend assets are compiled into the checksummed executable;
   the application does not load a remote web UI. User/server values are HTML
   escaped, SSH bytes are written only to xterm, and credentials are not placed
   in browser storage.
@@ -107,7 +111,7 @@
 
 ## Trust boundaries
 
-The local server binary runs as root during `apply`, `reset`, and `user-add` and
+The embedded server binary runs as root during `apply`, `reset`, and `user-add` and
 therefore belongs to the trusted computing base. The Windows admin application
 uses `golang.org/x/crypto/ssh` for pinned host-key verification, command
 transport, bounded uploads and PTY sessions. A compatibility OpenSSH adapter is

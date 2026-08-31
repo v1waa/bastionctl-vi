@@ -28,7 +28,7 @@ const demoServer = {
 };
 
 const demoBackend = {
-  InitialState: async () => ({ version: "2.0.0-dev", platform: "windows/amd64", state_root: "C:\\Users\\admin\\AppData\\Roaming\\bastionctl", profiles: ["minimal", "web", "docker-host", "wireguard", "database"], servers: [demoServer] }),
+  InitialState: async () => ({ version: "2.1.0-dev", platform: "windows/amd64", state_root: "C:\\Users\\admin\\AppData\\Roaming\\bastionctl", profiles: ["minimal", "web", "docker-host", "wireguard", "database"], servers: [demoServer] }),
   SecuritySettings: async () => ({ profile: "web", manage_ssh: true, manage_firewall: true, manage_fail2ban: true, manage_automatic_updates: true, manage_auditd: true, manage_apparmor: true, manage_time_sync: true, password_authentication: false, permit_root_login: false, ssh_allowed_cidrs: "198.51.100.24/32", allowed_tcp_ports: "80, 443", allowed_udp_ports: "", automatic_reboot: false, automatic_reboot_time: "03:30", backup_markers: "", backup_max_age_hours: 26, backup_required: false }),
   History: async () => [{ action: "audit", timestamp: new Date().toISOString(), has_failures: false, path: "history/prod-1/latest-audit.json" }],
 	AuditAll: async () => [{ server: demoServer, operation: { report: { summary: { fail: 0 } } } }],
@@ -36,6 +36,8 @@ const demoBackend = {
   ProbeHostKey: async () => ({ target: demoServer.target, address: "[203.0.113.10]:22", algorithm: "ssh-ed25519", fingerprint: "SHA256:DEMO-fingerprint-for-preview", trusted: true, changed: false }),
   SaveSecuritySettings: async () => {}, ApplyProfile: async () => {},
 	UpdateServer: async () => demoServer, RemoveServer: async () => {},
+  InstallPreview: async () => ({ ubuntu_version: "24.04", architecture: "amd64", payload_name: "bastionctl-server-ubuntu-amd64", payload_size: 9138336, payload_sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", remote_executable: "/usr/local/bin/bastionctl", remote_config: "/etc/bastionctl/config.toml" }),
+	StartInstall: async () => "demo-install-session",
   CaptureSnapshot: async () => ({ baseline_created: false, diff: { changes: [] } }),
 	XHTTP: async () => ({ configured: false, config: {}, guide: [] }), ConfigureXHTTP: async () => ({}),
   TerminalInput: async () => {}, TerminalResize: async () => {}, StopTerminal: async () => {}
@@ -486,7 +488,7 @@ async function settingsView(content, server) {
       <article class="panel connection-settings"><div class="panel-title"><div><h3>Подключение и локальная запись</h3><p>Изменение адреса не меняет сервер, но потребует новой сверки fingerprint.</p></div></div><form id="server-form" class="form-grid">
         ${field("Название", "server-name", "text", server.name, true)}${field("SSH‑цель", "server-target", "text", server.target, true)}
         ${field("SSH‑порт", "server-port", "number", server.port, true)}${field("Закрытый ключ", "server-identity", "text", server.identity || "")}
-        ${field("Ubuntu‑бинарник для установки", "server-binary", "text", server.server_binary || "")}
+        <div class="notice full">Ubuntu-компоненты amd64 и arm64 уже встроены в это приложение. Отдельные файлы и пути к ним не нужны.</div>
         <div class="full button-row end"><button type="submit" class="secondary">Сохранить подключение</button><button type="button" class="danger-button" id="remove-server">Удалить запись</button></div>
       </form></article>`;
     document.querySelector("#settings-form").addEventListener("submit", (event) => saveSettings(event, server));
@@ -508,7 +510,7 @@ async function settingsView(content, server) {
 	  event.preventDefault();
 	  setBusy(true, "Сохраняем подключение…");
 	  try {
-	    await call("UpdateServer", { id: server.id, name: value("server-name"), target: value("server-target"), port: Number(value("server-port")), identity: value("server-identity"), server_binary: value("server-binary") });
+	    await call("UpdateServer", { id: server.id, name: value("server-name"), target: value("server-target"), port: Number(value("server-port")), identity: value("server-identity") });
 	    await refresh(false); render(); toast("Подключение сохранено", "success");
 	  } catch (error) { showError(error); } finally { setBusy(false); }
 	});
@@ -576,22 +578,38 @@ async function installServer(server) {
   if (server.bootstrap_pending) return openConnect(server, true);
   if (!server.host_key_trusted) return hostKeyFlow(server);
   modal({
-    title: "Установить серверный компонент",
-    body: `<div class="notice">Файлы будут загружены во временные пути, проверены по SHA‑256 и установлены с автоматическим откатом. В консоли введите sudo‑пароль администратора, когда его запросит Ubuntu.</div>${field("Пароль SSH‑ключа (если нужен)", "install-passphrase", "password")}`,
-    submit: "Загрузить и открыть консоль",
+    title: "Проверить план установки",
+    body: `<div class="notice">Приложение подключится только для чтения, подтвердит Ubuntu и архитектуру, затем покажет точный встроенный компонент. Загрузка начнётся лишь после отдельного подтверждения.</div>${field("Пароль SSH‑ключа (если нужен)", "install-passphrase", "password")}`,
+    submit: "Проверить сервер",
     onSubmit: async () => {
       const passphrase = value("install-passphrase");
-      closeModal();
+      setBusy(true, "Проверяем Ubuntu и архитектуру…");
+      let preview;
+      try {
+        preview = await call("InstallPreview", { server_id: server.id, passphrase });
+        closeModal();
+      } catch (error) {
+        showError(error);
+        return;
+      } finally { setBusy(false); }
+      const sizeMiB = (Number(preview.payload_size) / 1048576).toFixed(1);
+      const confirmation = await confirmText({
+        title: "Подтвердите установку",
+        text: `Обнаружена Ubuntu ${preview.ubuntu_version}, ${preview.architecture}. Из этого приложения будет загружен ${preview.payload_name} (${sizeMiB} MiB, SHA‑256 ${preview.payload_sha256}) и установлен как ${preview.remote_executable}. Конфигурация: ${preview.remote_config}. Старые управляемые файлы будут сохранены для автоматического отката.`,
+        expected: `INSTALL ${server.id}`,
+        dangerous: false
+      });
+      if (!confirmation) return;
       state.tab = "terminal";
       render();
       ensureTerminal();
-      setBusy(true, "Проверяем архитектуру и загружаем файлы…");
+      setBusy(true, "Загружаем встроенный Ubuntu-компонент…");
       try {
         state.session = await call("StartInstall", {
-          server_id: server.id, binary_path: "", passphrase,
+          server_id: server.id, confirmation, passphrase,
           columns: state.terminal.cols || 100, rows: state.terminal.rows || 30
         });
-        state.terminal.writeln("\r\n\x1b[36mФайлы загружены. При запросе [sudo] password введите пароль администратора.\x1b[0m");
+        state.terminal.writeln("\r\n\x1b[36mВстроенный компонент выбран автоматически и загружен. При запросе [sudo] password введите пароль администратора.\x1b[0m");
         renderContent();
       } catch (error) { showError(error); } finally { setBusy(false); }
     }
@@ -640,7 +658,7 @@ function openAddServer() {
           id: value("add-id"), name: value("add-name"), target: `${user}@${host}`,
           port: Number(value("add-port")), identity: value("add-identity"), profile: value("add-profile"),
           ssh_allowed_cidrs: value("add-cidrs").split(/[\n,;]/).map((item) => item.trim()).filter(Boolean),
-          server_binary: "", password_bootstrap: bootstrap, bootstrap_admin_user: bootstrap ? value("add-admin-user") : ""
+          password_bootstrap: bootstrap, bootstrap_admin_user: bootstrap ? value("add-admin-user") : ""
         });
         closeModal();
         await refresh(false);
@@ -669,13 +687,14 @@ function toggle(label, id, enabled) {
 function value(id) { return document.querySelector(`#${id}`)?.value || ""; }
 function checked(id) { return Boolean(document.querySelector(`#${id}`)?.checked); }
 
-function modal({ title, body, submit, onSubmit, dangerous = false, wide = false }) {
+function modal({ title, body, submit, onSubmit, onCancel = null, dangerous = false, wide = false }) {
   const layer = document.querySelector("#modal-layer");
   layer.innerHTML = `<div class="modal-backdrop"><section class="modal ${wide ? "wide" : ""}" role="dialog" aria-modal="true"><header><h2>${esc(title)}</h2><button class="modal-close" aria-label="Закрыть">×</button></header><div class="modal-body">${body}</div><footer><button class="secondary modal-cancel">Отмена</button><button class="${dangerous ? "danger-button" : "primary"} modal-submit">${esc(submit)}</button></footer></section></div>`;
-  layer.querySelector(".modal-close").addEventListener("click", closeModal);
-  layer.querySelector(".modal-cancel").addEventListener("click", closeModal);
+  const cancel = () => { closeModal(); onCancel?.(); };
+  layer.querySelector(".modal-close").addEventListener("click", cancel);
+  layer.querySelector(".modal-cancel").addEventListener("click", cancel);
   layer.querySelector(".modal-submit").addEventListener("click", onSubmit);
-  layer.querySelector(".modal-backdrop").addEventListener("mousedown", (event) => { if (event.target === event.currentTarget) closeModal(); });
+  layer.querySelector(".modal-backdrop").addEventListener("mousedown", (event) => { if (event.target === event.currentTarget) cancel(); });
   layer.querySelector("input, textarea, select")?.focus();
 }
 
@@ -683,14 +702,12 @@ function closeModal() { document.querySelector("#modal-layer").innerHTML = ""; }
 
 function confirmText({ title, text, expected, dangerous }) {
   return new Promise((resolve) => {
-    modal({ title, dangerous, body: `<div class="notice ${dangerous ? "danger" : "warning"}">${esc(text)}</div>${field(expected, "exact-confirm", "text", "", true)}`, submit: "Подтвердить", onSubmit: () => {
+    modal({ title, dangerous, body: `<div class="notice ${dangerous ? "danger" : "warning"}">${esc(text)}</div>${field(expected, "exact-confirm", "text", "", true)}`, submit: "Подтвердить", onCancel: () => resolve(""), onSubmit: () => {
       const result = value("exact-confirm");
       if (result !== expected) return showError(`Ожидается точная строка: ${expected}`);
       closeModal();
       resolve(result);
     }});
-    document.querySelector(".modal-cancel").addEventListener("click", () => resolve(""), { once: true });
-    document.querySelector(".modal-close").addEventListener("click", () => resolve(""), { once: true });
   });
 }
 

@@ -1,13 +1,15 @@
-# Архитектура bastionctl 2.0
+# Архитектура bastionctl 2.1
 
 ## Целевая модель
 
-Версия 2.0 разделяет продукт на две явно разные роли:
+Версия 2.1 разделяет продукт на две явно разные роли:
 
 ```mermaid
-flowchart LR
-    UI["Windows desktop\nWails + WebView2"] --> CORE["Desktop core\nоперации и состояние"]
+flowchart TD
+    UI["Один Windows exe\nWails + WebView2"] --> CORE["Desktop core\nоперации и состояние"]
+    UI --> PAYLOAD["Embedded Ubuntu\namd64 + arm64"]
     CORE --> SSH["Встроенный SSH\nhost key + auth + PTY"]
+    PAYLOAD --> SSH
     SSH --> CLI["Ubuntu binary\nserver mode"]
     CLI --> OS["Ubuntu controls\nSSH, UFW, updates"]
 ```
@@ -29,7 +31,8 @@ flowchart LR
 | Windows shell | `cmd/bastionctl-desktop`, `internal/desktopui`, `ui/windows` | Native window, WebView2 assets, события и lifecycle |
 | Desktop application | `internal/desktop` | View models, подтверждения, workflows, отсутствие секретов в state |
 | Domain controller | `internal/controller`, `internal/state`, `internal/profile` | Реестр, policy, история, snapshots, orchestration |
-| SSH transport | `internal/terminal`, `internal/admin` | Pinned host key, key/password auth, command transport, upload, PTY |
+| SSH transport | `internal/terminal`, `internal/admin` | Pinned host key, key/password auth, memory/file upload, PTY |
+| Embedded payload | `internal/serverpayload` | Выбор и проверка встроенного Ubuntu ELF для архитектуры сервера |
 | Ubuntu runtime | `cmd/bastionctl`, `internal/server`, `internal/workload` | Audit/plan/apply/reset и workload controls |
 | Compatibility UI | `internal/console`, `internal/tui`, `internal/cli` | Rescue/automation CLI и прежний TUI |
 
@@ -90,13 +93,17 @@ stateDiagram-v2
 
 Установка вынесена в reusable `PreparedInstall`:
 
-1. встроенный SSH определяет `uname -m`;
-2. локальный ELF сверяется с `amd64`/`arm64`;
-3. бинарник, config и sudoers получают случайные remote paths;
-4. каждый файл загружается через SSH без SCP и до 100 MiB;
-5. один PTY workflow запрашивает sudo-пароль, проверяет SHA-256 и `visudo`;
-6. прежние root-owned файлы сохраняются во временные backups;
-7. failure запускает rollback, success — version probe через новое соединение;
+1. read-only SSH подтверждает `ID=ubuntu`, версию и `uname -m`;
+2. `internal/serverpayload` выбирает встроенный amd64/arm64 ELF и повторно
+   проверяет его заголовок, размер и SHA-256;
+3. UI показывает точный payload и пути, затем требует `INSTALL <server-id>`;
+4. бинарник передаётся прямо из памяти, а config и sudoers — из локального
+   управляемого state; все получают случайные remote paths;
+5. SSH-приёмник сверяет число байт, install transaction — SHA-256 и `visudo`;
+6. один PTY workflow запрашивает sudo-пароль и сохраняет старые root-owned
+   файлы во временные backups;
+7. failure запускает rollback, success требует version probe, совпадающий с
+   версией Windows-приложения;
 8. временные локальные/удалённые файлы удаляются.
 
 CLI compatibility path использует ту же policy и прежний OpenSSH/SCP adapter.
@@ -129,6 +136,10 @@ Frontend не содержит React и отдельного API-сервера.
 вызывает Wails bindings, xterm.js отображает бинарно-совместимый терминальный
 поток, а FitAddon синхронизирует rows/columns с remote PTY. Production assets
 собираются Vite и встраиваются через `go:embed`.
+
+Release pipeline всегда использует Wails build tag `production`; обычный
+`go build` считается недопустимым. Проверка размера PE не позволяет выпустить
+Wails-заглушку или файл без двух Ubuntu payload’ов.
 
 Секретные поля имеют `type=password` и передаются только в конкретный вызов.
 UI никогда не сохраняет их в localStorage/sessionStorage. Отчёты рендерятся с

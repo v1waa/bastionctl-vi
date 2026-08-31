@@ -1,5 +1,6 @@
 /dist/
 /ui/windows/node_modules/
+/internal/serverpayload/bin/
 *.test
 *.out
 .DS_Store

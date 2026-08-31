@@ -17,6 +17,7 @@ import (
 	"bastionctl/internal/inventory"
 	"bastionctl/internal/profile"
 	"bastionctl/internal/report"
+	"bastionctl/internal/serverpayload"
 	"bastionctl/internal/state"
 	"bastionctl/internal/terminal"
 	"bastionctl/internal/workload"
@@ -50,7 +51,6 @@ type ServerView struct {
 	Port             int       `json:"port"`
 	Identity         string    `json:"identity,omitempty"`
 	Profile          string    `json:"profile"`
-	ServerBinary     string    `json:"server_binary,omitempty"`
 	BootstrapTarget  string    `json:"bootstrap_target,omitempty"`
 	BootstrapPending bool      `json:"bootstrap_pending"`
 	HostKeyTrusted   bool      `json:"host_key_trusted"`
@@ -67,18 +67,16 @@ type AddServerRequest struct {
 	Identity           string   `json:"identity"`
 	Profile            string   `json:"profile"`
 	SSHAllowedCIDRs    []string `json:"ssh_allowed_cidrs"`
-	ServerBinary       string   `json:"server_binary"`
 	PasswordBootstrap  bool     `json:"password_bootstrap"`
 	BootstrapAdminUser string   `json:"bootstrap_admin_user"`
 }
 
 type UpdateServerRequest struct {
-	ID           string `json:"id"`
-	Name         string `json:"name"`
-	Target       string `json:"target"`
-	Port         int    `json:"port"`
-	Identity     string `json:"identity"`
-	ServerBinary string `json:"server_binary"`
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	Target   string `json:"target"`
+	Port     int    `json:"port"`
+	Identity string `json:"identity"`
 }
 
 type HostKeyView struct {
@@ -102,11 +100,26 @@ type BootstrapRequest struct {
 }
 
 type InstallRequest struct {
+	ServerID     string `json:"server_id"`
+	Confirmation string `json:"confirmation"`
+	Passphrase   string `json:"passphrase"`
+	Columns      int    `json:"columns"`
+	Rows         int    `json:"rows"`
+}
+
+type InstallPreviewRequest struct {
 	ServerID   string `json:"server_id"`
-	BinaryPath string `json:"binary_path"`
 	Passphrase string `json:"passphrase"`
-	Columns    int    `json:"columns"`
-	Rows       int    `json:"rows"`
+}
+
+type InstallPreviewView struct {
+	UbuntuVersion    string `json:"ubuntu_version"`
+	Architecture     string `json:"architecture"`
+	PayloadName      string `json:"payload_name"`
+	PayloadSize      int64  `json:"payload_size"`
+	PayloadSHA256    string `json:"payload_sha256"`
+	RemoteExecutable string `json:"remote_executable"`
+	RemoteConfig     string `json:"remote_config"`
 }
 
 type SecurityActionRequest struct {
@@ -223,7 +236,7 @@ func (a *App) AddServer(request AddServerRequest) (ServerView, error) {
 	item, err := a.controller.AddServer(controller.AddOptions{
 		ID: request.ID, Name: request.Name, Target: request.Target, Port: request.Port,
 		Identity: request.Identity, Profile: request.Profile, SSHAllowedCIDRs: request.SSHAllowedCIDRs,
-		ServerBinary: request.ServerBinary, PasswordBootstrap: request.PasswordBootstrap,
+		ServerBinary: "", PasswordBootstrap: request.PasswordBootstrap,
 		BootstrapAdminUser: request.BootstrapAdminUser,
 	})
 	if err != nil {
@@ -235,7 +248,7 @@ func (a *App) AddServer(request AddServerRequest) (ServerView, error) {
 func (a *App) UpdateServer(request UpdateServerRequest) (ServerView, error) {
 	item, err := a.controller.UpdateServer(controller.UpdateOptions{
 		ID: request.ID, Name: request.Name, Target: request.Target, Port: request.Port,
-		Identity: request.Identity, ServerBinary: request.ServerBinary,
+		Identity: request.Identity, ServerBinary: "",
 	})
 	if err != nil {
 		return ServerView{}, err
@@ -383,7 +396,32 @@ func (a *App) RunSecurityAction(request SecurityActionRequest) (*controller.Oper
 	return result, err
 }
 
+func (a *App) InstallPreview(request InstallPreviewRequest) (InstallPreviewView, error) {
+	item, path, err := a.connectionDetails(request.ServerID)
+	if err != nil {
+		return InstallPreviewView{}, err
+	}
+	if item.BootstrapPending {
+		return InstallPreviewView{}, errors.New("сначала завершите первичный вход по паролю")
+	}
+	if !terminal.HasPinnedHostKey(path) {
+		return InstallPreviewView{}, errors.New("сначала сверьте и закрепите SSH fingerprint")
+	}
+	cfg, err := a.controller.Config(item.ID)
+	if err != nil {
+		return InstallPreviewView{}, err
+	}
+	ctx, cancel := context.WithTimeout(a.context(), 45*time.Second)
+	defer cancel()
+	preview, _, _, err := a.inspectInstallTarget(ctx, item, path, request.Passphrase, cfg.Admin.RemoteExecutable, cfg.Admin.RemoteConfig)
+	request.Passphrase = ""
+	return preview, err
+}
+
 func (a *App) StartInstall(request InstallRequest) (string, error) {
+	if request.Confirmation != "INSTALL "+request.ServerID {
+		return "", errors.New("для установки введите INSTALL " + request.ServerID)
+	}
 	item, path, err := a.connectionDetails(request.ServerID)
 	if err != nil {
 		return "", err
@@ -398,26 +436,14 @@ func (a *App) StartInstall(request InstallRequest) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	connection := terminal.Connection{
-		ServerID: item.ID, Target: item.Target, Port: item.Port, Identity: item.Identity,
-		KnownHosts: path, ConnectTimeout: 10 * time.Second,
-	}
 	credentials := terminal.Credentials{Passphrase: request.Passphrase}
 	prepareCtx, cancel := context.WithTimeout(a.context(), 8*time.Minute)
 	defer cancel()
-	architectureResult, err := terminal.RunCommand(prepareCtx, connection, credentials, "uname -m", nil)
-	if err != nil {
-		return "", fmt.Errorf("определить архитектуру Ubuntu: %w", err)
-	}
-	architecture, err := admin.NormalizeArchitecture(architectureResult.Stdout)
+	preview, payload, connection, err := a.inspectInstallTarget(prepareCtx, item, path, request.Passphrase, cfg.Admin.RemoteExecutable, cfg.Admin.RemoteConfig)
 	if err != nil {
 		return "", err
 	}
-	selected, err := a.controller.ResolveServerBinary(item.ID, request.BinaryPath, architecture)
-	if err != nil {
-		return "", err
-	}
-	prepared, err := admin.PrepareInstall(cfg.Admin, item.Target, selected, item.ConfigPath, architecture, true, true)
+	prepared, err := admin.PrepareInstallPayload(cfg.Admin, item.Target, payload.Name, payload.Data, item.ConfigPath, preview.Architecture, true, true)
 	if err != nil {
 		return "", err
 	}
@@ -428,9 +454,15 @@ func (a *App) StartInstall(request InstallRequest) (string, error) {
 		}
 	}()
 	for _, upload := range prepared.Uploads {
-		if err := terminal.UploadFile(prepareCtx, connection, credentials, upload.Local, upload.Remote, 100<<20); err != nil {
+		var uploadErr error
+		if len(upload.Data) != 0 {
+			uploadErr = terminal.UploadBytes(prepareCtx, connection, credentials, upload.Data, upload.Remote, 100<<20)
+		} else {
+			uploadErr = terminal.UploadFile(prepareCtx, connection, credentials, upload.Local, upload.Remote, 100<<20)
+		}
+		if uploadErr != nil {
 			a.cleanupPreparedInstall(prepareCtx, connection, credentials, prepared)
-			return "", err
+			return "", uploadErr
 		}
 	}
 	handle, err := a.terminal.StartCommand(a.context(), connection, credentials, request.Columns, request.Rows, prepared.Command)
@@ -440,8 +472,39 @@ func (a *App) StartInstall(request InstallRequest) (string, error) {
 	}
 	started = true
 	request.Passphrase = ""
+	selected := "embedded:" + a.version + "/" + payload.Name
 	go a.finishInstall(item, selected, cfg.Admin.RemoteExecutable, credentials, connection, prepared, handle)
 	return handle.ID, nil
+}
+
+func (a *App) inspectInstallTarget(ctx context.Context, item state.ManagedServer, knownHosts, passphrase, remoteExecutable, remoteConfig string) (InstallPreviewView, serverpayload.Payload, terminal.Connection, error) {
+	connection := terminal.Connection{
+		ServerID: item.ID, Target: item.Target, Port: item.Port, Identity: item.Identity,
+		KnownHosts: knownHosts, ConnectTimeout: 10 * time.Second,
+	}
+	command := "set -eu; test \"$(uname -s)\" = Linux; . /etc/os-release; test \"${ID:-}\" = ubuntu; printf '%s\\n' \"${VERSION_ID:-unknown}\"; uname -m"
+	result, err := terminal.RunCommand(ctx, connection, terminal.Credentials{Passphrase: passphrase}, command, nil)
+	if err != nil {
+		return InstallPreviewView{}, serverpayload.Payload{}, connection, fmt.Errorf("проверить Ubuntu и архитектуру сервера: %w", err)
+	}
+	lines := splitLines(result.Stdout)
+	if len(lines) != 2 {
+		return InstallPreviewView{}, serverpayload.Payload{}, connection, errors.New("сервер вернул неожиданный ответ проверки Ubuntu")
+	}
+	architecture, err := admin.NormalizeArchitecture(lines[1])
+	if err != nil {
+		return InstallPreviewView{}, serverpayload.Payload{}, connection, err
+	}
+	payload, err := serverpayload.ForArchitecture(architecture)
+	if err != nil {
+		return InstallPreviewView{}, serverpayload.Payload{}, connection, err
+	}
+	preview := InstallPreviewView{
+		UbuntuVersion: lines[0], Architecture: architecture, PayloadName: payload.Name,
+		PayloadSize: int64(len(payload.Data)), PayloadSHA256: payload.SHA256,
+		RemoteExecutable: remoteExecutable, RemoteConfig: remoteConfig,
+	}
+	return preview, payload, connection, nil
 }
 
 func (a *App) CreateUser(request UserRequest) (*controller.OperationResult, error) {
@@ -650,9 +713,11 @@ func (a *App) finishInstall(item state.ManagedServer, selected, executable strin
 		cancel()
 		if verifyErr != nil {
 			r.Add(report.Result{Control: "install-verify", Status: report.Fail, Severity: "critical", Message: "файлы установлены, но проверка серверного компонента не удалась", Details: map[string]string{"error": verifyErr.Error()}})
+		} else if installedVersion := strings.TrimSpace(result.Stdout); installedVersion != a.version {
+			r.Add(report.Result{Control: "install-version", Status: report.Fail, Severity: "critical", Message: "версия встроенного и установленного компонентов не совпала", Details: map[string]string{"expected": a.version, "installed": installedVersion}})
 		} else {
 			r.Add(report.Result{Control: "architecture", Status: report.Pass, Severity: "high", Message: "архитектура Ubuntu подтверждена", Details: map[string]string{"architecture": prepared.Architecture}})
-			r.Add(report.Result{Control: "upload", Status: report.Pass, Severity: "high", Message: "SHA-256 загруженных файлов проверен"})
+			r.Add(report.Result{Control: "upload", Status: report.Pass, Severity: "high", Message: "SHA-256 встроенного компонента и загруженных файлов проверен", Details: map[string]string{"payload": prepared.PayloadName, "sha256": prepared.PayloadSHA256}})
 			r.Add(report.Result{Control: "install", Status: report.Changed, Severity: "critical", Message: "серверная часть и конфигурация установлены", Changed: true, Details: map[string]string{"executable": executable, "version": strings.TrimSpace(result.Stdout)}})
 			r.Add(report.Result{Control: "sudo-policy", Status: report.Changed, Severity: "critical", Message: "установлена ограниченная NOPASSWD-политика bastionctl", Changed: true})
 		}
@@ -703,7 +768,7 @@ func (a *App) serverView(item state.ManagedServer) ServerView {
 	path, _ := a.controller.KnownHostsPath(item.ID)
 	return ServerView{
 		ID: item.ID, Name: item.Name, Target: item.Target, Port: item.Port, Identity: item.Identity,
-		Profile: item.Profile, ServerBinary: item.ServerBinary, BootstrapTarget: item.BootstrapTarget,
+		Profile: item.Profile, BootstrapTarget: item.BootstrapTarget,
 		BootstrapPending: item.BootstrapPending, HostKeyTrusted: terminal.HasPinnedHostKey(path),
 		LastSeenAt: item.LastSeenAt, LastAction: item.LastAction, LastStatus: item.LastStatus,
 	}

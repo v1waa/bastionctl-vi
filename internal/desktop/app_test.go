@@ -98,6 +98,9 @@ func TestDesktopRejectsUntrustedTerminalAndUnsafeConfirmation(t *testing.T) {
 	if _, err := app.RunSecurityAction(SecurityActionRequest{ServerID: "edge", Action: "apply", Confirmation: "yes"}); err == nil {
 		t.Fatal("apply accepted without exact confirmation")
 	}
+	if _, err := app.StartInstall(InstallRequest{ServerID: "edge", Confirmation: "yes"}); err == nil || !strings.Contains(err.Error(), "INSTALL edge") {
+		t.Fatalf("install accepted without exact confirmation: %v", err)
+	}
 	if _, err := parsePorts("22, nope"); err == nil {
 		t.Fatal("invalid port accepted")
 	}

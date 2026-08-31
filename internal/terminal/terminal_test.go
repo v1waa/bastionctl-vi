@@ -106,3 +106,12 @@ func TestRemoteUploadPathIsBounded(t *testing.T) {
 		}
 	}
 }
+
+func TestUploadBytesRejectsEmptyAndUnsafePayloads(t *testing.T) {
+	if err := UploadBytes(context.Background(), Connection{}, Credentials{}, nil, "/tmp/bastionctl-bin-0123456789abcdef01234567", 1024); err == nil {
+		t.Fatal("empty embedded payload was accepted")
+	}
+	if err := UploadBytes(context.Background(), Connection{}, Credentials{}, []byte("payload"), "/etc/bastionctl", 1024); err == nil {
+		t.Fatal("unsafe embedded payload path was accepted")
+	}
+}

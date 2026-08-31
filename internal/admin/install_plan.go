@@ -1,6 +1,8 @@
 package admin
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -13,15 +15,19 @@ import (
 type InstallUpload struct {
 	Local  string `json:"local"`
 	Remote string `json:"remote"`
+	Data   []byte `json:"-"`
 }
 
 type PreparedInstall struct {
-	Architecture string          `json:"architecture"`
-	Uploads      []InstallUpload `json:"uploads"`
-	Command      string          `json:"command"`
-	RemotePaths  []string        `json:"remote_paths"`
-	InstallSudo  bool            `json:"install_sudo"`
-	localSudoers string
+	Architecture  string          `json:"architecture"`
+	PayloadName   string          `json:"payload_name"`
+	PayloadSHA256 string          `json:"payload_sha256"`
+	PayloadSize   int64           `json:"payload_size"`
+	Uploads       []InstallUpload `json:"uploads"`
+	Command       string          `json:"command"`
+	RemotePaths   []string        `json:"remote_paths"`
+	InstallSudo   bool            `json:"install_sudo"`
+	localSudoers  string
 }
 
 func PrepareInstall(cfg config.AdminConfig, target, binaryPath, configPath, architecture string, installSudo, interactiveSudo bool) (*PreparedInstall, error) {
@@ -38,6 +44,42 @@ func PrepareInstall(cfg config.AdminConfig, target, binaryPath, configPath, arch
 	if localArch != architecture {
 		return nil, fmt.Errorf("выбран бинарник %s, а сервер использует %s", localArch, architecture)
 	}
+	binaryDigest, err := fileSHA256(binaryPath)
+	if err != nil {
+		return nil, err
+	}
+	info, err := os.Stat(binaryPath)
+	if err != nil {
+		return nil, err
+	}
+	return prepareInstall(cfg, target, InstallUpload{Local: binaryPath}, filepath.Base(binaryPath), binaryDigest, info.Size(), configPath, architecture, installSudo, interactiveSudo)
+}
+
+// PrepareInstallPayload creates the same transactional install plan as the
+// file-based compatibility path, but keeps an embedded server binary in
+// memory so the Windows application remains a single executable.
+func PrepareInstallPayload(cfg config.AdminConfig, target, payloadName string, payload []byte, configPath, architecture string, installSudo, interactiveSudo bool) (*PreparedInstall, error) {
+	if len(payload) == 0 || len(payload) > 100<<20 {
+		return nil, errors.New("встроенный серверный компонент имеет недопустимый размер")
+	}
+	localArch, err := ELFArchitectureData(payload)
+	if err != nil {
+		return nil, fmt.Errorf("проверить встроенный серверный компонент: %w", err)
+	}
+	if localArch != architecture {
+		return nil, fmt.Errorf("встроен компонент %s, а сервер использует %s", localArch, architecture)
+	}
+	digest := sha256.Sum256(payload)
+	return prepareInstall(cfg, target, InstallUpload{Data: payload}, filepath.Base(payloadName), hex.EncodeToString(digest[:]), int64(len(payload)), configPath, architecture, installSudo, interactiveSudo)
+}
+
+func prepareInstall(cfg config.AdminConfig, target string, binaryUpload InstallUpload, payloadName, binaryDigest string, payloadSize int64, configPath, architecture string, installSudo, interactiveSudo bool) (*PreparedInstall, error) {
+	if err := ValidateTarget(target); err != nil {
+		return nil, err
+	}
+	if architecture != "amd64" && architecture != "arm64" {
+		return nil, fmt.Errorf("неподдерживаемая архитектура сервера %q", architecture)
+	}
 	if err := validateUploadFile(configPath, 2<<20); err != nil {
 		return nil, fmt.Errorf("проверить конфигурацию: %w", err)
 	}
@@ -52,14 +94,15 @@ func PrepareInstall(cfg config.AdminConfig, target, binaryPath, configPath, arch
 	backupConfig := "/tmp/bastionctl-old-config-" + suffix
 	backupSudoers := "/tmp/bastionctl-old-sudoers-" + suffix
 	prepared := &PreparedInstall{
-		Architecture: architecture,
+		Architecture: architecture, PayloadName: payloadName, PayloadSHA256: binaryDigest, PayloadSize: payloadSize,
 		Uploads: []InstallUpload{
-			{Local: binaryPath, Remote: remoteBinary},
+			binaryUpload,
 			{Local: configPath, Remote: remoteConfig},
 		},
 		RemotePaths: []string{remoteBinary, remoteConfig, remoteSudoers},
 		InstallSudo: installSudo,
 	}
+	prepared.Uploads[0].Remote = remoteBinary
 	if installSudo {
 		prepared.localSudoers, err = createSudoersFile(target, cfg)
 		if err != nil {
@@ -73,10 +116,6 @@ func PrepareInstall(cfg config.AdminConfig, target, binaryPath, configPath, arch
 			prepared.Close()
 		}
 	}()
-	binaryDigest, err := fileSHA256(binaryPath)
-	if err != nil {
-		return nil, err
-	}
 	configDigest, err := fileSHA256(configPath)
 	if err != nil {
 		return nil, err

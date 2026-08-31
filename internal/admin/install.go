@@ -197,6 +197,16 @@ func ELFArchitecture(path string) (string, error) {
 	if _, err := io.ReadFull(file, header); err != nil {
 		return "", err
 	}
+	return ELFArchitectureData(header)
+}
+
+// ELFArchitectureData validates the architecture fields of a Linux ELF64
+// payload before it is ever sent to a managed server.
+func ELFArchitectureData(data []byte) (string, error) {
+	if len(data) < 20 {
+		return "", errors.New("ELF-заголовок слишком короткий")
+	}
+	header := data[:20]
 	if !bytes.Equal(header[:4], []byte{0x7f, 'E', 'L', 'F'}) || header[4] != 2 || header[5] != 1 {
 		return "", errors.New("ожидается 64-битный little-endian ELF бинарник Linux")
 	}

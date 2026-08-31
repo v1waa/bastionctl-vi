@@ -61,7 +61,22 @@ jobs:
         run: |
           npm ci
           npm run build
-      - name: Test Windows packages
-        run: go test ./...
-      - name: Build native desktop application
-        run: go build -trimpath -buildvcs=false -ldflags "-s -w -H=windowsgui -X main.version=2.0.0-ci" -o bastionctl-admin-windows-amd64.exe ./cmd/bastionctl-desktop
+      - name: Build embedded Ubuntu payloads
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force internal/serverpayload/bin | Out-Null
+          $env:CGO_ENABLED = '0'
+          $env:GOOS = 'linux'
+          $env:GOARCH = 'amd64'
+          go build -trimpath -buildvcs=false -ldflags '-s -w -X main.version=2.1.0-ci' -o internal/serverpayload/bin/bastionctl-server-ubuntu-amd64 ./cmd/bastionctl
+          $env:GOARCH = 'arm64'
+          go build -trimpath -buildvcs=false -ldflags '-s -w -X main.version=2.1.0-ci' -o internal/serverpayload/bin/bastionctl-server-ubuntu-arm64 ./cmd/bastionctl
+      - name: Test Windows production packages
+        run: go test -tags production ./...
+      - name: Build single-file desktop application
+        run: go build -tags production -trimpath -buildvcs=false -ldflags "-s -w -H=windowsgui -X main.version=2.1.0-ci" -o bastionctl.exe ./cmd/bastionctl-desktop
+      - name: Verify embedded production build
+        shell: pwsh
+        run: |
+          $size = (Get-Item ./bastionctl.exe).Length
+          if ($size -lt 20000000) { throw "bastionctl.exe does not contain the production UI and both Ubuntu payloads" }

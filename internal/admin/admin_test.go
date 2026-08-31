@@ -190,6 +190,34 @@ func TestPrepareInteractiveInstallIsReusableAndBounded(t *testing.T) {
 	}
 }
 
+func TestPrepareEmbeddedInstallKeepsPayloadInMemory(t *testing.T) {
+	directory := t.TempDir()
+	payload := make([]byte, 64)
+	copy(payload, []byte{0x7f, 'E', 'L', 'F'})
+	payload[4] = 2
+	payload[5] = 1
+	binary.LittleEndian.PutUint16(payload[18:20], 183)
+	configPath := filepath.Join(directory, "config.toml")
+	data, err := config.Render(config.Defaults())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := PrepareInstallPayload(config.Defaults().Admin, "ops@example.com", "bastionctl-server-ubuntu-arm64", payload, configPath, "arm64", false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer prepared.Close()
+	if prepared.PayloadName != "bastionctl-server-ubuntu-arm64" || len(prepared.PayloadSHA256) != 64 || prepared.PayloadSize != int64(len(payload)) {
+		t.Fatalf("unexpected payload metadata: %+v", prepared)
+	}
+	if len(prepared.Uploads) != 2 || len(prepared.Uploads[0].Data) != len(payload) || prepared.Uploads[0].Local != "" {
+		t.Fatalf("embedded payload was not kept in memory: %+v", prepared.Uploads)
+	}
+}
+
 func TestGenerateIdentityAndReadPublicKey(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("test helper uses a POSIX script")
