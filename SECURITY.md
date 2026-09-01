@@ -2,7 +2,7 @@
 
 ## Assumptions
 
-- The supported 2.1 server starts from a vendor-maintained Ubuntu 22.04/24.04
+- The supported 2.2 server starts from a vendor-maintained Ubuntu 22.04/24.04
   LTS image. Debian code paths remain compatibility-only until a later release.
 - The operator controls either an existing non-root sudo account with a valid
   public-key login or the initial root/non-root SSH password issued for a new

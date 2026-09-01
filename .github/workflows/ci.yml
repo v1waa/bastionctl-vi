@@ -3,13 +3,45 @@ name: ci
 on:
   push:
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
+  frontend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: ui/windows/package-lock.json
+      - name: Test frontend and release safety
+        run: |
+          npm --prefix ui/windows ci
+          npm --prefix ui/windows test
+          node --test scripts/release.test.mjs
+      - name: Verify production assets
+        run: |
+          npm --prefix ui/windows run build
+          git diff --exit-code -- internal/desktopui/dist
+      - name: Install CI-only browser test driver
+        run: npm install --prefix "$RUNNER_TEMP/bastionctl-browser" --no-package-lock --ignore-scripts --no-audit --no-fund playwright@1.62.1
+      - name: Browser smoke with mock SSH backend
+        env:
+          PLAYWRIGHT_MODULE: ${{ runner.temp }}/bastionctl-browser/node_modules/playwright/index.mjs
+        run: node scripts/browser-smoke.mjs
+
   ubuntu-core:
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
@@ -40,6 +72,9 @@ jobs:
 
   windows-desktop:
     runs-on: windows-latest
+    timeout-minutes: 25
+    env:
+      CGO_ENABLED: '0'
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -48,7 +83,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
-          go-version: '1.25.x'
+          go-version: 'stable'
           cache: false
       - name: Set up Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
@@ -60,7 +95,14 @@ jobs:
         working-directory: ui/windows
         run: |
           npm ci
+          npm test
           npm run build
+      - name: Read release version
+        shell: pwsh
+        run: |
+          $releaseVersion = (Get-Content VERSION -Raw).Trim()
+          if ($releaseVersion -notmatch '^\d+\.\d+\.\d+$') { throw "Invalid VERSION" }
+          "BASTIONCTL_VERSION=$releaseVersion" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Build embedded Ubuntu payloads
         shell: pwsh
         run: |
@@ -68,15 +110,58 @@ jobs:
           $env:CGO_ENABLED = '0'
           $env:GOOS = 'linux'
           $env:GOARCH = 'amd64'
-          go build -trimpath -buildvcs=false -ldflags '-s -w -X main.version=2.1.0-ci' -o internal/serverpayload/bin/bastionctl-server-ubuntu-amd64 ./cmd/bastionctl
+          go build -trimpath -buildvcs=false -ldflags "-s -w -X main.version=$env:BASTIONCTL_VERSION" -o internal/serverpayload/bin/bastionctl-server-ubuntu-amd64 ./cmd/bastionctl
           $env:GOARCH = 'arm64'
-          go build -trimpath -buildvcs=false -ldflags '-s -w -X main.version=2.1.0-ci' -o internal/serverpayload/bin/bastionctl-server-ubuntu-arm64 ./cmd/bastionctl
+          go build -trimpath -buildvcs=false -ldflags "-s -w -X main.version=$env:BASTIONCTL_VERSION" -o internal/serverpayload/bin/bastionctl-server-ubuntu-arm64 ./cmd/bastionctl
       - name: Test Windows production packages
         run: go test -tags production ./...
       - name: Build single-file desktop application
-        run: go build -tags production -trimpath -buildvcs=false -ldflags "-s -w -H=windowsgui -X main.version=2.1.0-ci" -o bastionctl.exe ./cmd/bastionctl-desktop
+        run: go build -tags production -trimpath -buildvcs=false -ldflags "-s -w -H=windowsgui -X main.version=$env:BASTIONCTL_VERSION" -o bastionctl.exe ./cmd/bastionctl-desktop
       - name: Verify embedded production build
         shell: pwsh
         run: |
           $size = (Get-Item ./bastionctl.exe).Length
           if ($size -lt 20000000) { throw "bastionctl.exe does not contain the production UI and both Ubuntu payloads" }
+
+  release:
+    name: Build and publish release
+    needs: [frontend, ubuntu-core, windows-desktop]
+    if: >-
+      github.repository == 'v1waa/bastionctl-vi' &&
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    permissions:
+      contents: write
+    concurrency:
+      group: bastionctl-release
+      cancel-in-progress: false
+    steps:
+      - name: Checkout verified commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: 'stable'
+          cache: false
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: ui/windows/package-lock.json
+      - name: Build twice and verify reproducibility
+        shell: bash
+        run: |
+          sh scripts/build.sh
+          cp dist/SHA256SUMS "$RUNNER_TEMP/bastionctl-first.SHA256SUMS"
+          sh scripts/build.sh
+          cmp "$RUNNER_TEMP/bastionctl-first.SHA256SUMS" dist/SHA256SUMS
+          git diff --exit-code
+      - name: Publish verified assets without overwriting existing releases
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/release.mjs

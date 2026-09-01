@@ -1,10 +1,11 @@
 {
   "name": "bastionctl-windows-ui",
   "private": true,
-  "version": "2.1.0",
+  "version": "2.2.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "test": "node --test test/*.test.js",
     "build": "vite build"
   },
   "dependencies": {

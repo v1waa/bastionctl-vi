@@ -1,8 +1,8 @@
 #!/bin/sh
 set -eu
 
-VERSION="${VERSION:-2.1.0}"
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+VERSION="${VERSION:-$(cat "$ROOT/VERSION")}"
 DIST="$ROOT/dist"
 PAYLOAD_DIR="$ROOT/internal/serverpayload/bin"
 
@@ -24,6 +24,8 @@ mkdir -p "$DIST" "$PAYLOAD_DIR"
 cd "$ROOT"
 
 npm --prefix ui/windows ci
+npm --prefix ui/windows test
+node --test scripts/release.test.mjs
 npm --prefix ui/windows run build
 
 build_payload() {

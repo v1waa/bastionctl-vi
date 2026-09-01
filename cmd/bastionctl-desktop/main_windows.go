@@ -49,13 +49,13 @@ func main() {
 		Title:             "bastionctl",
 		Width:             1280,
 		Height:            820,
-		MinWidth:          980,
-		MinHeight:         640,
+		MinWidth:          880,
+		MinHeight:         560,
 		DisableResize:     false,
 		Frameless:         false,
 		StartHidden:       false,
 		HideWindowOnClose: false,
-		BackgroundColour:  &options.RGBA{R: 15, G: 18, B: 22, A: 1},
+		BackgroundColour:  &options.RGBA{R: 48, G: 48, B: 48, A: 255},
 		AssetServer:       &assetserver.Options{Assets: desktopui.Assets},
 		OnStartup: func(ctx context.Context) {
 			bridge.set(ctx)
@@ -65,7 +65,7 @@ func main() {
 		Windows: &windows.Options{
 			WebviewIsTransparent:              false,
 			WindowIsTranslucent:               false,
-			DisableWindowIcon:                 false,
+			DisableWindowIcon:                 true,
 			DisableFramelessWindowDecorations: false,
 			WebviewUserDataPath:               "",
 			ZoomFactor:                        1,
